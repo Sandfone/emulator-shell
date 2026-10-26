@@ -1,0 +1,5 @@
+.build/
+.swiftpm/
+*.xcodeproj
+# Partial SDK install left by a tool that did not expand ~
+/~/
