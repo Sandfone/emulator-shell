@@ -222,10 +222,10 @@ private struct AvdDetail: View {
                     Group {
                         if case .running = status {
                             TimelineView(.periodic(from: .now, by: 1)) { _ in
-                                DevicePreview(avd: avd, deviceType: manager.deviceType(of: avd), screen: manager.thumbnail(of: avd))
+                                DevicePreview(avd: avd, deviceType: manager.deviceType(of: avd), thumbnail: manager.thumbnail(of: avd))
                             }
                         } else {
-                            DevicePreview(avd: avd, deviceType: manager.deviceType(of: avd), screen: nil)
+                            DevicePreview(avd: avd, deviceType: manager.deviceType(of: avd), thumbnail: nil)
                         }
                     }
                     .frame(width: landscape ? 250 : 120, height: landscape ? 170 : 250)
@@ -399,7 +399,10 @@ private struct InfoGroup: View {
                     HStack(alignment: .firstTextBaseline, spacing: 16) {
                         Text(row.0).foregroundStyle(.secondary)
                         Spacer(minLength: 0)
-                        Text(row.1).multilineTextAlignment(.trailing).textSelection(.enabled)
+                        // A path too long for the column keeps its start and its folder's name.
+                        Text(row.1).multilineTextAlignment(.trailing).truncationMode(.middle).textSelection(.enabled)
+                            .help(row.1)
+                            .layoutPriority(1)
                     }
                     .padding(.horizontal, 12)
                     .padding(.vertical, 7)
@@ -438,36 +441,49 @@ struct DevicePreview: View {
     let skinFolder: URL?
     /// Width over height of the display, for devices without a skin.
     let aspect: CGFloat
+    /// Upright for the viewer.
     let screen: CGImage?
+    /// Counterclockwise quarter turns the device is held at.
+    let quarterTurns: Int
 
-    init(avd: Avd, deviceType: DeviceType?, screen: CGImage?) {
-        skinFolder = avd.skinFolder ?? deviceType?.skinFolder
+    init(avd: Avd, deviceType: DeviceType?, thumbnail: DeviceThumbnail?) {
+        skinFolder = thumbnail?.skinFolder ?? avd.skinFolder ?? deviceType?.skinFolder
         let width = avd.config["hw.lcd.width"].flatMap(Double.init) ?? 1080
         let height = avd.config["hw.lcd.height"].flatMap(Double.init) ?? 2400
         aspect = width / height
-        self.screen = screen
+        screen = thumbnail?.screen
+        quarterTurns = thumbnail?.quarterTurns ?? 0
     }
 
     init(deviceType: DeviceType?, landscape: Bool) {
         skinFolder = deviceType?.skinFolder
         aspect = landscape ? 16.0 / 10.0 : 9.0 / 19.5
         screen = nil
+        quarterTurns = 0
     }
 
     var body: some View {
         GeometryReader { geometry in
             let box = geometry.size
             if let folder = skinFolder, let skin = SkinPreview.load(folder) {
-                let scale = min(box.width / skin.size.width, box.height / skin.size.height)
+                // Drawn upright and turned as a whole like the device window; the screen, already upright for
+                // the viewer, is turned back inside it.
+                let sideways = quarterTurns % 2 == 1
+                let shown = sideways ? CGSize(width: skin.size.height, height: skin.size.width) : skin.size
+                let scale = min(box.width / shown.width, box.height / shown.height)
+                let display = CGSize(width: skin.display.width * scale, height: skin.display.height * scale)
                 ZStack(alignment: .topLeading) {
                     Group {
                         if let screen {
                             Image(decorative: screen, scale: 1).resizable()
+                                .frame(width: sideways ? display.height : display.width,
+                                       height: sideways ? display.width : display.height)
+                                .rotationEffect(.degrees(Double(quarterTurns) * 90))
                         } else {
                             Color(white: 0.06)
                         }
                     }
-                    .frame(width: skin.display.width * scale, height: skin.display.height * scale)
+                    .frame(width: display.width, height: display.height)
                     .clipShape(RoundedRectangle(cornerRadius: skin.cornerRadius * scale))
                     .offset(x: skin.display.minX * scale, y: skin.display.minY * scale)
                     Image(nsImage: skin.frame).resizable()
@@ -475,9 +491,13 @@ struct DevicePreview: View {
                         .offset(x: skin.frameRect.minX * scale, y: skin.frameRect.minY * scale)
                 }
                 .frame(width: skin.size.width * scale, height: skin.size.height * scale)
+                .rotationEffect(.degrees(Double(quarterTurns) * -90))
+                .frame(width: shown.width * scale, height: shown.height * scale)
                 .shadow(color: .black.opacity(0.2), radius: 7, y: 4)
                 .frame(width: box.width, height: box.height)
             } else {
+                // No artwork to turn: the box takes the screen's shape as the viewer sees it.
+                let aspect = quarterTurns % 2 == 1 ? 1 / aspect : aspect
                 let width = min(box.width, box.height * aspect)
                 let height = width / aspect
                 ZStack {

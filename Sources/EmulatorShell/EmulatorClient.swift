@@ -86,6 +86,7 @@ final class EmulatorClient: Sendable {
                         seq: image.seq,
                         timestampUs: image.timestampUs,
                         rotation: image.format.rotation.rotation.rawValue,
+                        folded: image.format.hasFoldedDisplay,
                         pixels: pixels
                     )
                 }
@@ -162,6 +163,15 @@ final class EmulatorClient: Sendable {
         try await controller.streamClipboard(Google_Protobuf_Empty()) { response in
             for try await clip in response.messages {
                 onText(clip.text)
+            }
+        }
+    }
+
+    /// Delivers the foldable posture now and on every change, whoever made it, until cancelled.
+    func streamPosture(onPosture: @escaping @Sendable (PostureValue) -> Void) async throws {
+        try await controller.streamNotification(Google_Protobuf_Empty()) { response in
+            for try await notification in response.messages {
+                if case let .posture(posture)? = notification.type { onPosture(posture.value) }
             }
         }
     }

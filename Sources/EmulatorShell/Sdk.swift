@@ -2,6 +2,14 @@ import Foundation
 
 /// Where the Android SDK and its AVDs live, and how to run the SDK's command-line tools.
 enum Sdk {
+    /// The folder with a skin's `layout`: the skin folder itself, or for a foldable its `default` folder,
+    /// which shows the device unfolded (`closed` holds the folded one).
+    static func skinArtwork(in folder: URL) -> URL? {
+        [folder, folder.appendingPathComponent("default")].first {
+            FileManager.default.fileExists(atPath: $0.appendingPathComponent("layout").path)
+        }
+    }
+
     static var root: URL {
         let env = ProcessInfo.processInfo.environment
         // Some launchers (the `android` CLI) pass the path with an unexpanded `~`.

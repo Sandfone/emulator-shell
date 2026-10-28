@@ -12,7 +12,9 @@ final class DeviceView: NSView {
     var onScreenPress: (() -> Void)?
     var contextMenuProvider: (() -> NSMenu)?
 
-    private let skin: DeviceSkin
+    private var skin: DeviceSkin
+    /// `DeviceSkin.cornerInsets()`, measured once per skin.
+    private var skinCornerInsets: [CGFloat]
     /// Size of the upright device in whole points, so a quarter turn about its centre keeps pixels on the grid.
     private(set) var deviceSize: CGSize
     /// Points per skin pixel the layers are drawn for.
@@ -40,6 +42,7 @@ final class DeviceView: NSView {
 
     init(skin: DeviceSkin, scale: CGFloat) {
         self.skin = skin
+        skinCornerInsets = skin.cornerInsets()
         self.scale = scale
         liveScale = scale
         deviceSize = CGSize(width: (skin.size.width * scale).rounded(), height: (skin.size.height * scale).rounded())
@@ -83,10 +86,17 @@ final class DeviceView: NSView {
 
     /// The view's size with the device at `turns` quarter turns and `scale` points per skin pixel
     /// (by default the one shown).
-    func size(forQuarterTurns turns: Int, scale: CGFloat? = nil) -> CGSize {
-        let scale = scale ?? liveScale
+    func size(forQuarterTurns turns: Int, skin: DeviceSkin? = nil, scale: CGFloat? = nil) -> CGSize {
+        let scale = scale ?? liveScale, skin = skin ?? self.skin
         let size = CGSize(width: (skin.size.width * scale).rounded(), height: (skin.size.height * scale).rounded())
         return turns % 2 == 0 ? size : CGSize(width: size.height, height: size.width)
+    }
+
+    /// How far in from the corner of this view, per axis, the device's body starts at the shown size, for the
+    /// corner `clockwise` steps round from the top left.
+    func cornerInset(clockwise corner: Int) -> CGFloat {
+        // A counterclockwise quarter turn brings the skin's next corner clockwise to each corner of the view.
+        skinCornerInsets[(corner + quarterTurns) % 4] * liveScale
     }
 
     /// The skin's size in skin pixels with the device at `turns` quarter turns.
@@ -117,6 +127,27 @@ final class DeviceView: NSView {
         deviceLayer.bounds = CGRect(origin: .zero, size: deviceSize)
         deviceLayer.transform = shownTransform
         CATransaction.commit()
+        rebuildLayers()
+        needsLayout = true
+    }
+
+    /// Draws another skin at the same scale, e.g. a foldable's outer display once it is closed; the window is
+    /// resized separately.
+    func setSkin(_ skin: DeviceSkin) {
+        self.skin = skin
+        // The last frame is of the other display; dark until the first of this one's.
+        contentLayer.contents = nil
+        skinCornerInsets = skin.cornerInsets()
+        deviceLayer.removeAnimation(forKey: "turn")
+        deviceSize = size(forQuarterTurns: 0, scale: scale)
+        scaleX = deviceSize.width / skin.size.width
+        scaleY = deviceSize.height / skin.size.height
+        CATransaction.begin()
+        CATransaction.setDisableActions(true)
+        deviceLayer.bounds = CGRect(origin: .zero, size: deviceSize)
+        deviceLayer.transform = shownTransform
+        CATransaction.commit()
+        highlight(nil)
         rebuildLayers()
         needsLayout = true
     }
@@ -175,7 +206,11 @@ final class DeviceView: NSView {
         updateToolTips()
     }
 
+    /// While set, frames are not shown: the view keeps its last one, e.g. until a fold animation takes over.
+    var freezesFrames = false
+
     func show(frame surface: IOSurface, rotation: Int) {
+        guard !freezesFrames else { return }
         if rotation != contentTurns {
             contentTurns = rotation
             layoutContent()
@@ -185,15 +220,35 @@ final class DeviceView: NSView {
 
     /// Turns the device to `turns` counterclockwise quarter turns; the window is resized separately.
     func setQuarterTurns(_ turns: Int, animated: Bool) {
-        guard turns != quarterTurns else { return }
-        let from = deviceLayer.presentation()?.transform ?? deviceLayer.transform
+        setQuarterTurns(turns, scale: scale, animated: animated)
+    }
+
+    /// How long a turn takes; the window resizes along with it.
+    static let turnDuration: TimeInterval = 0.3
+
+    /// Turns the device to `turns` and draws it at `newScale` (it may fit the screen at another size turned),
+    /// animating both from how it looks now, so that the turn is never cut short by the new size.
+    func setQuarterTurns(_ turns: Int, scale newScale: CGFloat, animated: Bool) {
+        guard turns != quarterTurns || newScale != scale else { return }
+        var from = deviceLayer.presentation()?.transform ?? deviceLayer.transform
+        if newScale != scale {
+            // Drawn anew at the new size: the old look is the new layer stretched back by the ratio.
+            let ratio = scale / newScale
+            from = CATransform3DScale(from, ratio, ratio, 1)
+            liveScale = newScale
+            commitScale()
+        }
         quarterTurns = turns
+        deviceLayer.removeAnimation(forKey: "turn")
+        CATransaction.begin()
+        CATransaction.setDisableActions(true)
         deviceLayer.transform = shownTransform
+        CATransaction.commit()
         if animated {
             let animation = CABasicAnimation(keyPath: "transform")
             animation.fromValue = from
             animation.toValue = deviceLayer.transform
-            animation.duration = 0.3
+            animation.duration = Self.turnDuration
             animation.timingFunction = CAMediaTimingFunction(name: .easeInEaseOut)
             deviceLayer.add(animation, forKey: "turn")
         }
@@ -375,13 +430,109 @@ final class DeviceView: NSView {
 
 /// The device's borderless window. Borderless windows refuse key status by default, which would swallow
 /// all keyboard input; and the system does not keep them on screen, so dragging does.
+///
+/// What the user sees and sizes is the box: the device with its bars. The window reaches `margin` further
+/// on every side, where the corner resize areas extend past the box as a standard window's do.
 final class DeviceWindow: NSWindow {
+    static let margin: CGFloat = ResizeHandle.outside
+
+    /// The box, in screen coordinates.
+    var box: CGRect { frame.insetBy(dx: Self.margin, dy: Self.margin) }
+
+    func setBox(_ box: CGRect, display: Bool, animate: Bool = false) {
+        setFrame(box.insetBy(dx: -Self.margin, dy: -Self.margin), display: display, animate: animate)
+    }
+
+    /// Moves and resizes to `box` over `duration` from `start` (a `CACurrentMediaTime()`), eased like the
+    /// device's own Core Animation animations, which it goes along with; `completion` runs at the end.
+    ///
+    /// Stepped on each refresh of the display, at the point in time the device's animation has reached, so
+    /// the two stay together: an AppKit animator runs on its own clock, falls behind when this thread is
+    /// busy and lands after the device does, nudging the window once the live view is back.
+    func setBox(_ box: CGRect, duration: TimeInterval, start: CFTimeInterval = CACurrentMediaTime(), completion: (() -> Void)? = nil) {
+        stopBoxAnimation()
+        let frame = box.insetBy(dx: -Self.margin, dy: -Self.margin)
+        guard frame != self.frame else {
+            completion?()
+            return
+        }
+        boxAnimation = (from: self.frame, to: frame, start: start, duration: duration, completion: completion)
+        // The screen's link rather than the window's: that one stops while the window is covered, as it is by
+        // the fold animation's overlay.
+        let link = (screen ?? NSScreen.main)?.displayLink(target: self, selector: #selector(stepBoxAnimation))
+            ?? displayLink(target: self, selector: #selector(stepBoxAnimation))
+        link.add(to: .main, forMode: .common)
+        boxLink = link
+        // Display links pause while the screen is locked or asleep; the animation still ends, on time.
+        boxAnimationID += 1
+        let id = boxAnimationID
+        DispatchQueue.main.asyncAfter(deadline: .now() + duration + 0.1) { [weak self] in
+            guard let self, self.boxAnimationID == id, self.boxAnimation != nil else { return }
+            self.stepBoxAnimation()
+        }
+    }
+
+    /// Ends a `setBox(_:duration:)` animation where it is, without its completion.
+    func stopBoxAnimation() {
+        boxLink?.invalidate()
+        boxLink = nil
+        boxAnimation = nil
+    }
+
+    private var boxAnimation: (from: CGRect, to: CGRect, start: CFTimeInterval, duration: TimeInterval, completion: (() -> Void)?)?
+    private var boxLink: CADisplayLink?
+    private var boxAnimationID = 0
+
+    @objc private func stepBoxAnimation() {
+        guard let animation = boxAnimation else { return stopBoxAnimation() }
+        let progress = min(max((CACurrentMediaTime() - animation.start) / animation.duration, 0), 1)
+        let eased = Self.easeInOut(progress)
+        func mix(_ a: CGFloat, _ b: CGFloat) -> CGFloat { (a + (b - a) * eased).rounded() }
+        let frame = progress >= 1 ? animation.to : CGRect(x: mix(animation.from.minX, animation.to.minX),
+                                                           y: mix(animation.from.minY, animation.to.minY),
+                                                           width: mix(animation.from.width, animation.to.width),
+                                                           height: mix(animation.from.height, animation.to.height))
+        if frame != self.frame { setFrame(frame, display: true) }
+        guard progress >= 1 else { return }
+        stopBoxAnimation()
+        animation.completion?()
+    }
+
+    /// `CAMediaTimingFunction(name: .easeInEaseOut)`: the cubic Bézier through (0.42, 0) and (0.58, 1).
+    static func easeInOut(_ time: Double) -> Double {
+        // Finds the curve's parameter whose x is `time` by bisection (x rises with it), then its y.
+        var low = 0.0, high = 1.0, s = time
+        for _ in 0..<20 {
+            s = (low + high) / 2
+            let x = 3 * (1 - s) * (1 - s) * s * 0.42 + 3 * (1 - s) * s * s * 0.58 + s * s * s
+            if x < time { low = s } else { high = s }
+        }
+        return 3 * s * s - 2 * s * s * s
+    }
+
+    /// `contentRect` is the box's.
+    override init(contentRect: NSRect, styleMask: NSWindow.StyleMask, backing: NSWindow.BackingStoreType, defer flag: Bool) {
+        super.init(contentRect: contentRect.insetBy(dx: -Self.margin, dy: -Self.margin), styleMask: styleMask, backing: backing, defer: flag)
+        // The cursor follows the pointer over the corners, which needs its moves outside any view's tracking area.
+        acceptsMouseMovedEvents = true
+    }
+
     /// Called once a drag that moved the window ends.
     var onMoved: (() -> Void)?
+    /// Called with `true` once a drag first brings the box's top against the top of the screen, and with
+    /// `false` when that drag ends.
+    var onScreenTopReached: ((Bool) -> Void)?
     private var dragEndTimer: Timer?
 
     override var canBecomeKey: Bool { true }
     override var canBecomeMain: Bool { true }
+
+    /// The Window menu's ⌘M; without a title bar of its own the window would only beep.
+    override func performMiniaturize(_ sender: Any?) { miniaturize(sender) }
+
+    /// Placement keeps the box (not the empty margin around it) on screen, so AppKit must not push the
+    /// margin out from under the menu bar.
+    override func constrainFrameRect(_ frameRect: NSRect, to screen: NSScreen?) -> NSRect { frameRect }
 
     /// Moves the window with the pointer, then brings any part dragged off the screen back.
     func drag(with event: NSEvent) {
@@ -390,20 +541,36 @@ final class DeviceWindow: NSWindow {
         // The window server moves the window and `performDrag` returns at once, so the drag's end is found by
         // watching for the button to come up.
         dragEndTimer?.invalidate()
+        var reachedTop = false
         dragEndTimer = Timer.scheduledTimer(withTimeInterval: 0.05, repeats: true) { [weak self] timer in
             MainActor.assumeIsolated {
-                guard NSEvent.pressedMouseButtons & 1 == 0, let self else { return }
+                guard let self else { return }
+                guard NSEvent.pressedMouseButtons & 1 == 0 else {
+                    if !reachedTop, self.atScreenTop {
+                        reachedTop = true
+                        self.onScreenTopReached?(true)
+                    }
+                    return
+                }
                 timer.invalidate()
                 self.dragEndTimer = nil
+                if reachedTop { self.onScreenTopReached?(false) }
                 guard self.frame.origin != before else { return }
-                let fitted = Self.fitted(self.frame, on: self.screen ?? NSScreen.main)
-                if fitted != self.frame { self.setFrame(fitted, display: true, animate: true) }
+                let fitted = Self.fitted(self.box, on: self.screen ?? NSScreen.main)
+                if fitted != self.box { self.setBox(fitted, display: true, animate: true) }
                 self.onMoved?()
             }
         }
     }
 
-    /// `frame` moved (not resized) so it lies within the screen's visible area where it can.
+    /// Whether the box's top is at or above its screen's visible top, with no other screen above to move on to.
+    private var atScreenTop: Bool {
+        guard let screen, box.maxY >= screen.visibleFrame.maxY - 1 else { return false }
+        let above = CGPoint(x: box.midX, y: screen.frame.maxY + 1)
+        return !NSScreen.screens.contains { $0 != screen && $0.frame.contains(above) }
+    }
+
+    /// The box `frame` moved (not resized) so it lies within the screen's visible area where it can.
     static func fitted(_ frame: CGRect, on screen: NSScreen?) -> CGRect {
         guard let visible = screen?.visibleFrame else { return frame }
         var fitted = frame

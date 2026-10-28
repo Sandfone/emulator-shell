@@ -22,6 +22,7 @@ enum DeviceCommand {
                 ("截图", .action(.screenshot), "s", [.command]),
                 ("向左旋转", .action(.rotateLeft), left, [.command]),
                 ("向右旋转", .action(.rotateRight), right, [.command]),
+                ("折叠 / 展开", .action(.toggleFold), "f", [.command, .shift]),
             ],
             [
                 ("音量 −", .key("AudioVolumeDown"), down, [.command, .option]),
@@ -63,37 +64,77 @@ final class DeviceSession {
         didSet { onStateChange?(state) }
     }
     var onStateChange: ((State) -> Void)?
-    private(set) var window: NSWindow?
+    private(set) var window: DeviceWindow?
 
     private var emulator: EmulatorProcess?
     private var client: EmulatorClient?
     private var deviceView: DeviceView?
     private var shell: DeviceShellView?
     private var chrome: DeviceChrome?
-    private let skin: DeviceSkin
+    /// The skin shown: a foldable's `closedSkin` while it is closed, otherwise `openSkin`.
+    private var skin: DeviceSkin
+    private let openSkin: DeviceSkin
+    private let closedSkin: DeviceSkin?
+    /// Whether a foldable with `closedSkin` is closed, which shows that skin.
+    private var isClosed = false
+    /// For a foldable, until its first frame: the turn it is held at, which the emulator's own (on its side
+    /// while open) may differ from. Then, until frames report that turn or `holdingSince` is a few seconds
+    /// old, other turns they report are not followed.
+    private var heldTurns: Int?
+    private var holdingSince: Date?
+    /// A fold or unfold playing, with the live view hidden.
+    private var foldAnimation: FoldAnimation?
+    /// The last frames seen open and closed, for the side of a fold that is not on screen.
+    private var lastOpenScreen: DeviceThumbnail?
+    private var lastClosedScreen: DeviceThumbnail?
+    /// After folding: where the closed device was put, and where the open one was, so that unfolding a device
+    /// that has not been moved meanwhile puts it back exactly, without rounding creeping in.
+    private var unfoldsTo: (closed: CGPoint, open: CGPoint)?
+    /// From a posture change until its animation has ended (it starts once its pictures are drawn).
+    private var folding = false
+    /// Tells a fold whose pictures are being drawn whether another has come since.
+    private var foldID = 0
+    private var liveTargetDrawing = false
+    /// Whether the live view has shown a frame of the state its skin shows (not a blank one, as a display the
+    /// emulator has just switched to sends at first); a fold animation that ends before stays until then.
+    private var showsLiveState = true
+    private var foldEndWaiting: (() -> Void)?
+    /// Pixels per point of the pictures in the animation playing.
+    private var pictureScale: CGFloat = 2
     /// Points per skin pixel the user chose. The device is shown smaller only while it does not fit the
     /// screen, e.g. turned on its side; it returns to this size when it fits again.
     private var preferredScale: CGFloat = 1
-    /// During a corner drag: the dragged corner and the opposite one, which stays put.
-    private var resizing: (corner: ResizeHandle.Corner, anchor: CGPoint)?
+    /// During a corner drag: the dragged corner, where it started, the opposite corner (which stays put) and
+    /// the scale the drag started at.
+    private var resizing: (corner: ResizeHandle.Corner, start: CGPoint, anchor: CGPoint, scale: CGFloat)?
     /// Side of the square box the screen stream was last requested at, in pixels.
     private var streamSide = 0
     private var clipboard: ClipboardSync?
     private var sharedFrames: SharedFrameBuffer?
     private var tasks: [Task<Void, Never>] = []
     private var streamTask: Task<Void, Never>?
+    private var postureTask: Task<Void, Never>?
     /// Device input, sent strictly in order: separate Tasks may run out of order and swap a key's down and up.
     private var input: AsyncStream<@Sendable () async -> Void>.Continuation?
     /// Counterclockwise quarter turns the emulator reports the device is held at.
     private var deviceTurns = 0
     private var lastSurface: IOSurface?
+    /// The quarter turns `lastSurface` was reported at.
+    private var lastRotation = 0
 
     /// `cascade` offsets the window so several devices do not open on top of each other.
     /// `extraArguments` go to the emulator as they are, e.g. the ones Android Studio or Flutter passed.
     init(avd: Avd, grpcPort: Int, coldBoot: Bool, extraArguments: [String] = [], cascade: Int) throws {
         self.avd = avd
         self.grpcPort = grpcPort
-        skin = try DeviceSkin.load(avd: avd)
+        openSkin = try DeviceSkin.load(avd: avd)
+        skin = openSkin
+        do {
+            closedSkin = try avd.closedSkinFolder.map(DeviceSkin.load(folder:))
+        } catch {
+            Log.error("\(avd.id): closed skin unusable, staying with the open one: \(error)")
+            closedSkin = nil
+        }
         showWindow(cascade: cascade)
         try startEmulator(coldBoot: coldBoot, extraArguments: extraArguments)
     }
@@ -122,10 +163,34 @@ final class DeviceSession {
         })
     }
 
-    /// For app termination: interrupts every emulator first so their snapshots are saved in parallel.
+    /// For quitting: every device window goes away at once and the emulators save their snapshots in
+    /// parallel, without holding up the main thread; `done` runs once they have all exited.
+    static func stopAll(_ sessions: [DeviceSession], then done: @escaping () -> Void) {
+        let stopping = sessions.filter { $0.state == .booting || $0.state == .running }
+        for session in stopping {
+            session.state = .stopping
+            session.window?.orderOut(nil)
+            session.closeStreams()
+        }
+        Task {
+            try? await Task.sleep(for: streamsClosing)
+            stopping.forEach { $0.emulator?.interrupt() }
+            // Saving a snapshot has taken over 30 s here; only much later is an emulator considered stuck.
+            let deadline = ContinuousClock.now + .seconds(90)
+            while sessions.contains(where: { $0.emulator?.isRunning == true }), ContinuousClock.now < deadline {
+                try? await Task.sleep(for: .milliseconds(100))
+            }
+            sessions.forEach { $0.emulator?.terminate() }
+            done()
+        }
+    }
+
+    /// The last resort when the app ends without `stopAll(_:then:)` having finished: waits on the main thread.
     static func stopAll(_ sessions: [DeviceSession]) {
         sessions.forEach { $0.closeStreams() }
-        if !sessions.isEmpty { Thread.sleep(forTimeInterval: Self.streamsClosing / .seconds(1)) }
+        if sessions.contains(where: { $0.emulator?.isRunning == true }) {
+            Thread.sleep(forTimeInterval: Self.streamsClosing / .seconds(1))
+        }
         sessions.forEach { $0.emulator?.interrupt() }
         sessions.forEach { $0.emulator?.stop(timeout: 90) }
         sessions.forEach { $0.tearDown() }
@@ -139,6 +204,8 @@ final class DeviceSession {
     private func closeStreams() {
         streamTask?.cancel()
         streamTask = nil
+        postureTask?.cancel()
+        postureTask = nil
         clipboard?.stop()
     }
 
@@ -149,11 +216,13 @@ final class DeviceSession {
         }
     }
 
-    /// The latest frame, for the device manager's preview.
-    func thumbnail() -> CGImage? {
+    /// The latest frame, for the device manager's preview, with the skin and turn it is shown at.
+    func thumbnail() -> DeviceThumbnail? {
         guard let lastSurface else { return nil }
         let image = CIImage(ioSurface: lastSurface)
-        return CIContext(options: [.cacheIntermediates: false]).createCGImage(image, from: image.extent)
+        guard let screen = Self.imageContext.createCGImage(image, from: image.extent) else { return nil }
+        return DeviceThumbnail(screen: screen, quarterTurns: lastRotation,
+                               skinFolder: isClosed ? avd.closedSkinFolder : nil)
     }
 
     // MARK: - Window
@@ -172,11 +241,12 @@ final class DeviceSession {
 
         let view = DeviceView(skin: skin, scale: scale)
         view.setQuarterTurns(turns, animated: false)
+        if closedSkin != nil { heldTurns = turns }
         deviceTurns = turns
         let shell = DeviceShellView(deviceView: view)
         let size = DeviceShellView.boxSize(device: view.size(forQuarterTurns: turns))
-        shell.setFrameSize(size)
-        let window = DeviceWindow(contentRect: CGRect(origin: .zero, size: size), styleMask: [.borderless], backing: .buffered, defer: false)
+        let window = DeviceWindow(contentRect: CGRect(origin: .zero, size: size), styleMask: [.borderless, .miniaturizable], backing: .buffered, defer: false)
+        shell.setFrameSize(window.frame.size)
         window.isOpaque = false
         window.backgroundColor = .clear
         window.hasShadow = true
@@ -184,6 +254,7 @@ final class DeviceSession {
         window.title = avd.name
         window.isReleasedWhenClosed = false
         window.onMoved = { [weak self] in self?.windowMoved() }
+        window.onScreenTopReached = { [weak self] reached in self?.chrome?.holdTitleBar(reached) }
         var frame = CGRect(origin: .zero, size: size)
         if let savedTopLeft {
             frame.origin = CGPoint(x: savedTopLeft.x, y: savedTopLeft.y - size.height)
@@ -192,19 +263,21 @@ final class DeviceSession {
             frame.origin = CGPoint(x: (visible.midX - size.width / 2 + offset).rounded(),
                                    y: (visible.midY - size.height / 2 - offset).rounded())
         }
-        window.setFrame(DeviceWindow.fitted(frame, on: screen), display: false)
+        window.setBox(DeviceWindow.fitted(frame, on: screen), display: false)
         window.makeKeyAndOrderFront(nil)
         window.makeFirstResponder(view)
 
-        let chrome = DeviceChrome(container: shell, deviceName: avd.name, subtitle: subtitle(skin: skin))
+        let chrome = DeviceChrome(container: shell, deviceName: avd.name, subtitle: subtitle(skin: skin), foldable: closedSkin != nil)
         chrome.onKey = { [weak self] key, pressed in self?.sendKey(key, pressed: pressed) }
         chrome.onAction = { [weak self] action in self?.perform(action) }
         shell.chrome = chrome
         shell.onResize = { [weak self] phase in self?.resize(phase) }
 
         view.onTouch = { [weak self] point, pressed in
+            guard let self else { return }
+            let point = self.touchPoint(point)
             Log.debug("touch \(pressed ? "down" : "up") at \(Int(point.x)),\(Int(point.y))")
-            self?.enqueue { await $0.sendTouch(x: Int(point.x), y: Int(point.y), pressed: pressed) }
+            self.enqueue { await $0.sendTouch(x: Int(point.x), y: Int(point.y), pressed: pressed) }
         }
         view.onSideButton = { [weak self] key, pressed in self?.sendKey(key, pressed: pressed) }
         view.onScreenPress = { [weak chrome] in chrome?.dismiss() }
@@ -235,7 +308,7 @@ final class DeviceSession {
         let menu = NSMenu(title: "设备")
         for (index, group) in DeviceCommand.menuGroups.enumerated() {
             if index > 0 { menu.addItem(.separator()) }
-            for (title, command, shortcut, modifiers) in group {
+            for (title, command, shortcut, modifiers) in group where isAvailable(command) {
                 let item = ClosureMenuItem(title: title, keyEquivalent: shortcut) { [weak self] in self?.run(command) }
                 item.keyEquivalentModifierMask = modifiers
                 menu.addItem(item)
@@ -262,7 +335,7 @@ final class DeviceSession {
             }
             target = scale
         case .fit:
-            target = fitScale(turns: deviceTurns, in: screen?.visibleFrame.size ?? window.frame.size)
+            target = fitScale(turns: deviceTurns, in: screen?.visibleFrame.size ?? window.box.size)
         case .larger, .smaller:
             // In steps of 10 % of one-to-one pixels: 50 %, 60 %, 70 % …
             let pixel = pixelScale(on: screen)
@@ -270,13 +343,13 @@ final class DeviceSession {
             let step = zoom == .larger ? (percent + 0.05).rounded(.down) + 1 : (percent - 0.05).rounded(.up) - 1
             target = max(step, 1) / 10 * pixel
         }
-        let scale = min(max(target, minScale), fitScale(turns: deviceTurns, in: screen?.visibleFrame.size ?? window.frame.size))
+        let scale = min(max(target, minScale), fitScale(turns: deviceTurns, in: screen?.visibleFrame.size ?? window.box.size))
         preferredScale = scale
         let box = DeviceShellView.boxSize(device: view.size(forQuarterTurns: deviceTurns, scale: scale))
-        let old = window.frame
+        let old = window.box
         let frame = CGRect(x: (old.midX - box.width / 2).rounded(), y: (old.maxY - box.height).rounded(), width: box.width, height: box.height)
         view.setLiveScale(scale)
-        window.setFrame(DeviceWindow.fitted(frame, on: screen), display: true)
+        window.setBox(DeviceWindow.fitted(frame, on: screen), display: true)
         chrome?.showResizeReadout(readout(scale, on: screen))
         chrome?.showResizeReadout(nil)
         commitSize()
@@ -300,15 +373,22 @@ final class DeviceSession {
         let screen = window.screen ?? NSScreen.main
         switch phase {
         case let .began(corner):
-            let frame = window.frame
-            resizing = (corner, CGPoint(x: corner.isLeft ? frame.maxX : frame.minX, y: corner.isTop ? frame.minY : frame.maxY))
+            let frame = window.box
+            resizing = (corner,
+                        CGPoint(x: corner.isLeft ? frame.minX : frame.maxX, y: corner.isTop ? frame.maxY : frame.minY),
+                        CGPoint(x: corner.isLeft ? frame.maxX : frame.minX, y: corner.isTop ? frame.minY : frame.maxY),
+                        view.liveScale)
         case let .changed(point):
-            guard let (corner, anchor) = resizing else { return }
+            guard let (corner, start, anchor, startScale) = resizing else { return }
             let visible = screen?.visibleFrame ?? .infinite
             let skinSize = view.skinSize(forQuarterTurns: deviceTurns)
-            let rooms = DeviceShellView.topRoom + DeviceShellView.bottomRoom
-            // Follows whichever way the pointer went further.
-            var scale = max((abs(point.y - anchor.y) - rooms) / skinSize.height, abs(point.x - anchor.x) / skinSize.width)
+            // How far the corner moved outwards, per axis. The device grows by the part of that along its own
+            // diagonal, so it changes smoothly from the size it had, whichever way the pointer goes; the
+            // window's minimum width does not get in the way as it would measuring from the fixed corner.
+            let dx = (point.x - start.x) * (corner.isLeft ? -1 : 1)
+            let dy = (point.y - start.y) * (corner.isTop ? 1 : -1)
+            let diagonal = skinSize.width * skinSize.width + skinSize.height * skinSize.height
+            var scale = startScale + (dx * skinSize.width + dy * skinSize.height) / diagonal
             // As large as fits between the fixed corner and the screen's edges.
             let room = CGSize(width: corner.isLeft ? anchor.x - visible.minX : visible.maxX - anchor.x,
                               height: corner.isTop ? visible.maxY - anchor.y : anchor.y - visible.minY)
@@ -316,9 +396,9 @@ final class DeviceSession {
             scale = snapped(min(max(scale, minScale), max(largest, minScale)), largest: largest, on: screen)
             view.setLiveScale(scale)
             let box = DeviceShellView.boxSize(device: view.size(forQuarterTurns: deviceTurns, scale: scale))
-            window.setFrame(CGRect(x: corner.isLeft ? anchor.x - box.width : anchor.x,
-                                   y: corner.isTop ? anchor.y : anchor.y - box.height,
-                                   width: box.width, height: box.height), display: true)
+            let frame = CGRect(x: corner.isLeft ? anchor.x - box.width : anchor.x, y: corner.isTop ? anchor.y : anchor.y - box.height,
+                               width: box.width, height: box.height)
+            if frame != window.box { window.setBox(frame, display: true) }
             chrome?.showResizeReadout(readout(scale, on: screen))
         case .ended:
             guard resizing != nil else { return }
@@ -337,21 +417,36 @@ final class DeviceSession {
         if abs(scale - view.scale) > 0.0001 {
             view.setLiveScale(scale)
             let box = DeviceShellView.boxSize(device: view.size(forQuarterTurns: deviceTurns, scale: scale))
-            let old = window.frame
+            let old = window.box
             let frame = CGRect(x: old.minX, y: old.maxY - box.height, width: box.width, height: box.height)
-            window.setFrame(DeviceWindow.fitted(frame, on: screen), display: true)
+            window.setBox(DeviceWindow.fitted(frame, on: screen), display: true)
         }
         commitSize()
     }
 
     /// Once the size has settled: sharp layers at the new size, and frames streamed at its pixel size.
+    /// The square the screen is streamed in, in pixels: a square because the emulator fits the upright picture
+    /// into it, so one stream serves both orientations. For a foldable it fits either display at the chosen
+    /// size, so folding never asks for a new stream: asking while the emulator switches displays has crashed
+    /// it (writing frames past the end of the shared buffer).
+    private var wantedStreamSide: Int {
+        guard let view = deviceView else { return 0 }
+        let shown = max(view.displayPixelSize.width, view.displayPixelSize.height)
+        guard let closedSkin else { return Int(shown) }
+        // At the chosen size, which a fold does not change though either display may be shown smaller to fit.
+        let pixelsPerSkinPixel = max(view.scale, preferredScale) * (window?.backingScaleFactor ?? 2)
+        let displays = [openSkin, closedSkin].map { max($0.display.width, $0.display.height) * pixelsPerSkinPixel }
+        // Whole pixels, with one to spare for the display grown to the pixel grid.
+        return Int(max(shown, (displays.max() ?? 0).rounded(.up) + 1))
+    }
+
     private func commitSize() {
         guard let view = deviceView else { return }
         view.commitScale()
         shell?.needsLayout = true
         window?.invalidateShadow()
         savePlacement()
-        let side = Int(max(view.displayPixelSize.width, view.displayPixelSize.height))
+        let side = wantedStreamSide
         if side != streamSide, streamTask != nil, let client {
             Log.debug("display is now \(side) px; requesting frames at that size")
             startStream(client: client)
@@ -362,7 +457,7 @@ final class DeviceSession {
     private func snapped(_ scale: CGFloat, largest: CGFloat, on screen: NSScreen?) -> CGFloat {
         let height = deviceView?.skinSize(forQuarterTurns: deviceTurns).height ?? 0
         let candidates = [pixelScale(on: screen), physicalScale(on: screen), largest].compactMap { $0 }
-        return candidates.first { abs($0 - scale) * height < 8 && $0 <= largest && $0 >= minScale } ?? scale
+        return candidates.first { abs($0 - scale) * height < 6 && $0 <= largest && $0 >= minScale } ?? scale
     }
 
     /// "52 % · 666 × 1486": the size relative to one-to-one pixels, and the preset's name or the display's
@@ -394,10 +489,11 @@ final class DeviceSession {
     /// The device's long side is never shorter than 360 points.
     private var minScale: CGFloat { 360 / max(skin.size.width, skin.size.height) }
 
-    /// Device pixels per skin pixel: skins may draw the display at another size than the device's.
+    /// Device pixels per skin pixel: skins may draw the display at another size than the device's. `hw.lcd.*`
+    /// describes the open display, so a foldable's closed skin is measured by the open one.
     private var devicePixelsPerSkinPixel: CGFloat {
-        guard let width = avd.config["hw.lcd.width"].flatMap(Double.init), skin.display.width > 0 else { return 1 }
-        return CGFloat(width) / skin.display.width
+        guard let width = avd.config["hw.lcd.width"].flatMap(Double.init), openSkin.display.width > 0 else { return 1 }
+        return CGFloat(width) / openSkin.display.width
     }
 
     private func pixelScale(on screen: NSScreen?) -> CGFloat {
@@ -417,9 +513,9 @@ final class DeviceSession {
 
     private var placementKey: String { "deviceWindow.\(avd.id)" }
 
-    /// Remembers the chosen size, the device's turn and where the window's top-left corner is, for the next launch.
+    /// Remembers the chosen size, the device's turn and where the box's top-left corner is, for the next launch.
     private func savePlacement() {
-        guard let frame = window?.frame else { return }
+        guard let frame = window?.box else { return }
         UserDefaults.standard.set(["scale": Double(preferredScale), "x": Double(frame.minX), "top": Double(frame.maxY), "turns": deviceTurns], forKey: placementKey)
     }
 
@@ -463,6 +559,7 @@ final class DeviceSession {
                     Log.info("gRPC endpoint reachable, guest booted: \(booted)")
                 }
                 self?.startStream(client: client)
+                self?.followPosture(client: client)
                 while await !client.isBooted() {
                     try await Task.sleep(for: .seconds(1))
                 }
@@ -488,10 +585,12 @@ final class DeviceSession {
         guard state != .stopped else { return }
         tasks.forEach { $0.cancel() }
         streamTask?.cancel()
+        postureTask?.cancel()
         input?.finish()
         clipboard?.stop()
         client?.shutdown()
         chrome?.close()
+        shell?.stopTracking()
         window?.orderOut(nil)
         window?.close()
         sharedFrames = nil
@@ -501,9 +600,7 @@ final class DeviceSession {
 
     /// (Re)opens the screen stream at the display's current pixel size; a new stream starts with the current frame.
     private func startStream(client: EmulatorClient) {
-        let pixelSize = deviceView?.displayPixelSize ?? .zero
-        // A square box: the emulator fits the upright image into it, so one stream serves both orientations.
-        let side = Int(max(pixelSize.width, pixelSize.height))
+        let side = wantedStreamSide
         streamSide = side
         streamTask?.cancel()
         streamTask = Task { [weak self] in
@@ -529,15 +626,27 @@ final class DeviceSession {
         let counter = FrameCounter()
         let pool = SurfacePool()
         try await client.streamScreen(width: side, height: side, shared: sharedFrames) { [weak self] frame in
+            counter.noteShape(frame)
             let surface = pool.write(frame)
             counter.tick(frame, shown: surface != nil)
             guard let surface else { return }
-            let rotation = frame.rotation
+            let rotation = frame.rotation, folded = frame.folded
             DispatchQueue.main.async {
                 MainActor.assumeIsolated {
-                    self?.lastSurface = surface
-                    self?.deviceView?.show(frame: surface, rotation: rotation)
-                    self?.deviceTurned(to: rotation)
+                    guard let self else { return }
+                    // A foldable's frames of the other state, which keep coming for a moment after its posture
+                    // changes, do not belong in the skin it now shows.
+                    guard self.closedSkin == nil || folded == self.isClosed else { return }
+                    self.lastSurface = surface
+                    self.lastRotation = rotation
+                    self.deviceView?.show(frame: surface, rotation: rotation)
+                    if !self.showsLiveState, !Self.isBlank(surface) {
+                        self.showsLiveState = true
+                        self.foldEndWaiting?()
+                    }
+                    self.showLiveFold(folded: folded)
+                    self.holdTurn(reported: rotation)
+                    self.deviceTurned(to: rotation)
                 }
             }
         }
@@ -555,21 +664,45 @@ final class DeviceSession {
 
     private func perform(_ action: DeviceChrome.Action) {
         switch action {
+        case .close: stop()
+        case .minimize: window?.miniaturize(nil)
         case .screenshot: takeScreenshot()
         case .rotateLeft: rotate(by: 1)
         case .rotateRight: rotate(by: -1)
+        case .toggleFold: toggleFold()
         }
+    }
+
+    /// Whether `command` applies to this device: folding only to a foldable with a closed skin.
+    func isAvailable(_ command: DeviceCommand) -> Bool {
+        if case .action(.toggleFold) = command { return closedSkin != nil }
+        return true
+    }
+
+    /// Folds an open foldable shut or opens a closed one; the posture notification then plays the animation.
+    private func toggleFold() {
+        guard closedSkin != nil, !folding else { return }
+        let posture: PostureValue = isClosed ? .postureOpened : .postureClosed
+        enqueue { _ = try? await $0.setPosture(posture) }
     }
 
     // MARK: - Rotation
 
     /// Asks the emulator to turn the device; the shell follows once frames report the new orientation.
     private func rotate(by turns: Int) {
-        let target = ((deviceTurns + turns) % 4 + 4) % 4
+        turn(to: deviceTurns + turns)
+    }
+
+    /// Asks the emulator to hold the device at `turns` counterclockwise quarter turns.
+    /// `reopensIfSilent` reopens the screen stream when no frame reports the turn soon; not while folding,
+    /// when the emulator is switching displays.
+    private func turn(to turns: Int, reopensIfSilent: Bool = true) {
+        let target = (turns % 4 + 4) % 4
         let degrees: [Float] = [0, 90, 180, -90]
         Log.debug("rotate to \(degrees[target])°")
         enqueue { await $0.setRotation(degrees: degrees[target]) }
         // A screen that does not redraw (a portrait-only app) sends no frame to report the new orientation.
+        guard reopensIfSilent else { return }
         Task { [weak self] in
             try? await Task.sleep(for: .milliseconds(400))
             guard let self, self.deviceTurns != target, let client = self.client else { return }
@@ -581,22 +714,299 @@ final class DeviceSession {
     /// Turns the window with the device. A device that no longer fits the screen is shown smaller until it
     /// fits again at the preferred size.
     private func deviceTurned(to turns: Int) {
-        guard turns != deviceTurns, let window, let view = deviceView else { return }
+        // While folding the animation shows the device; the live view takes the turn once it is done.
+        guard turns != deviceTurns, !folding, heldTurns == nil, let view = deviceView else { return }
         deviceTurns = turns
+        // Turned, it may be shown at another size to fit; the turn animates that too.
+        view.setQuarterTurns(turns, scale: shownScale(turns: turns, on: window?.screen ?? NSScreen.main), animated: true)
+        reshapeWindow(animate: true)
+    }
+
+    /// Fits the window around the device as it is now held and drawn, keeping its centre where it was.
+    private func reshapeWindow(animate: Bool) {
+        guard let window, let view = deviceView else { return }
         let screen = window.screen ?? NSScreen.main
-        let scale = shownScale(turns: turns, on: screen)
+        let scale = shownScale(turns: deviceTurns, on: screen)
         if scale != view.scale {
             view.setLiveScale(scale)
             view.commitScale()
         }
-        let box = DeviceShellView.boxSize(device: view.size(forQuarterTurns: turns))
-        let old = window.frame
+        let box = DeviceShellView.boxSize(device: view.size(forQuarterTurns: deviceTurns))
+        let old = window.box
         let frame = CGRect(x: (old.midX - box.width / 2).rounded(), y: (old.midY - box.height / 2).rounded(),
                            width: box.width, height: box.height)
-        view.setQuarterTurns(turns, animated: true)
-        window.setFrame(DeviceWindow.fitted(frame, on: screen), display: true, animate: true)
+        let fitted = DeviceWindow.fitted(frame, on: screen)
+        shell?.needsLayout = true
+        if animate {
+            // Along with the device's turn, ending with it.
+            window.setBox(fitted, duration: DeviceView.turnDuration) { [weak self] in self?.commitSize() }
+        } else {
+            window.setBox(fitted, display: true)
+            commitSize()
+        }
+    }
+
+    // MARK: - Folding
+
+    /// The emulator reads touch coordinates in the open display's pixels and scales them to the display the guest
+    /// shows, so a closed foldable's points on its outer display are scaled up to that size first.
+    private func touchPoint(_ point: CGPoint) -> CGPoint {
+        guard skin.display.size != openSkin.display.size else { return point }
+        return CGPoint(x: (point.x * openSkin.display.width / skin.display.width).rounded(.down),
+                       y: (point.y * openSkin.display.height / skin.display.height).rounded(.down))
+    }
+
+    /// The emulator holds a book-style foldable on its side while open, unlike the closed one: after a cold boot it
+    /// reports a turn of 3. Folding keeps the turn, as a real device stays in the hand, so a foldable is held
+    /// as its window was last (upright the first time) from its first frame on, and the open and closed
+    /// device stay the same way up. Turns the frames report meanwhile are not followed, so the window does not
+    /// turn there and back.
+    private func holdTurn(reported: Int) {
+        guard let turns = heldTurns else { return }
+        guard let since = holdingSince else {
+            holdingSince = Date()
+            if reported != turns {
+                Log.debug("foldable reported turn \(reported); holding it at \(turns)")
+                turn(to: turns, reopensIfSilent: false)
+            } else {
+                heldTurns = nil
+            }
+            return
+        }
+        if reported == turns || Date().timeIntervalSince(since) > 5 { heldTurns = nil }
+    }
+
+    /// Follows the posture of a foldable, whether set from the "More" panel, the console or a snapshot.
+    private func followPosture(client: EmulatorClient) {
+        guard avd.config["hw.sensor.hinge"] == "yes" else { return }
+        postureTask?.cancel()
+        postureTask = Task { [weak self] in
+            do {
+                try await client.streamPosture { posture in
+                    DispatchQueue.main.async { MainActor.assumeIsolated { self?.postureChanged(to: posture) } }
+                }
+            } catch {
+                if !Task.isCancelled { Log.error("posture notifications ended: \(error)") }
+            }
+        }
+    }
+
+    /// A closed foldable shows its outer display, so the window switches to that skin, animated like a book
+    /// closing. The device stays held as it is (see `holdTurn`), so the two states are the same way up.
+    private func postureChanged(to posture: PostureValue) {
+        Log.debug("posture \(posture)")
+        chrome?.controls?.posture = posture
+        guard let closedSkin, let view = deviceView else { return }
+        let closed = posture == .postureClosed
+        guard closed != isClosed else { return }
+        isClosed = closed
+        chrome?.setFolded(closed)
+        let entering = closed ? closedSkin : openSkin
+        skin = entering
+        // Played for a change one sees happen, not for the posture a quick boot comes back in.
+        guard state == .running, let window, window.isVisible, let surface = lastSurface, let center = deviceCenterOnScreen else {
+            view.setSkin(entering)
+            reshapeWindow(animate: false)
+            return
+        }
+        let geometry = FoldAnimation.Geometry(open: view.size(forQuarterTurns: 0, skin: openSkin, scale: view.scale),
+                                              closed: view.size(forQuarterTurns: 0, skin: closedSkin, scale: view.scale),
+                                              hinge: openSkin.display.midX * view.scale)
+        // The state entered is shown as large as it fits, which may differ from the state left; the animation
+        // grows or shrinks to it while it folds.
+        let growth = shownScale(turns: deviceTurns, on: window.screen) / view.scale
+        // The closed device folds where the left half lands and unfolds where it is; it moves if the window
+        // for the state entered, which follows the device, would not fit the screen there.
+        let offset = geometry.offset(turns: deviceTurns)
+        let finalSize = view.size(forQuarterTurns: deviceTurns, skin: entering, scale: view.scale * growth)
+        let closedFrom = closed ? CGPoint(x: center.x + offset.x, y: center.y + offset.y) : center
+        let closedTo: CGPoint
+        let finalCenter: CGPoint
+        if closed {
+            finalCenter = fittedCenter(device: finalSize, center: closedFrom, on: window.screen)
+            closedTo = finalCenter
+        } else {
+            // Unfolded at the new size, the open device's centre is that much further from the closed one's.
+            let grown = CGPoint(x: offset.x * growth, y: offset.y * growth)
+            let unmoved = unfoldsTo.flatMap { abs($0.closed.x - center.x) < 2 && abs($0.closed.y - center.y) < 2 ? $0.open : nil }
+            finalCenter = fittedCenter(device: finalSize, center: unmoved ?? CGPoint(x: center.x - grown.x, y: center.y - grown.y),
+                                       on: window.screen)
+            closedTo = CGPoint(x: finalCenter.x + grown.x, y: finalCenter.y + grown.y)
+        }
+        // The window ends on whole points; the animation ends exactly where the live view then shows the device,
+        // which is centred across the box, `bottomRoom` above its bottom.
+        let finalBox = boxFrame(device: finalSize, center: finalCenter, on: window.screen)
+        let landed = CGPoint(x: finalBox.minX + finalSize.width / 2, y: finalBox.minY + DeviceShellView.bottomRoom + finalSize.height / 2)
+        let closedEnd = closed ? landed : CGPoint(x: landed.x + (closedTo.x - finalCenter.x), y: landed.y + (closedTo.y - finalCenter.y))
+
+        // The pictures take a while to draw, which would hold up the window's resizing (driven from this thread)
+        // behind the fold (driven by the render server); so they are drawn elsewhere, and both start together
+        // once they are ready. Meanwhile the live view keeps its last frame rather than the next state's.
+        view.freezesFrames = true
+        folding = true
+        foldID += 1
+        let id = foldID, turns = deviceTurns, leavingTurns = lastRotation
+        let other = closed ? lastClosedScreen : lastOpenScreen
+        let scale = window.backingScaleFactor * max(1, growth)
+        pictureScale = scale
+        let openSkin = openSkin
+        IOSurfaceIncrementUseCount(surface)
+        DispatchQueue.global(qos: .userInteractive).async { [weak self] in
+            let leaving = Self.image(of: surface)
+            IOSurfaceDecrementUseCount(surface)
+            let openScreen = closed ? leaving : other?.screen, openTurns = closed ? leavingTurns : other?.quarterTurns ?? 0
+            let closedScreen = closed ? other?.screen : leaving, closedTurns = closed ? other?.quarterTurns ?? 0 : leavingTurns
+            let openPicture = FoldAnimation.picture(skin: openSkin, screen: openScreen, screenTurns: openTurns, size: geometry.open, scale: scale)
+            let closedPicture = FoldAnimation.picture(skin: closedSkin, screen: closedScreen, screenTurns: closedTurns,
+                                                      size: geometry.closed, scale: scale)
+            DispatchQueue.main.async {
+                MainActor.assumeIsolated {
+                    guard let self, self.foldID == id, let view = self.deviceView, let window = self.window else { return }
+                    // The state being left looked like this; the other side shows it next time.
+                    if let leaving {
+                        let picture = DeviceThumbnail(screen: leaving, quarterTurns: leavingTurns, skinFolder: nil)
+                        if closed { self.lastOpenScreen = picture } else { self.lastClosedScreen = picture }
+                    }
+                    view.setSkin(entering)
+                    self.showsLiveState = false
+                    view.freezesFrames = false
+                    guard let openPicture, let closedPicture else {
+                        self.folding = false
+                        self.reshapeWindow(animate: false)
+                        return
+                    }
+                    view.isHidden = true
+                    self.foldAnimation?.finish()
+                    var animation: FoldAnimation?
+                    animation = FoldAnimation(closing: closed, geometry: geometry, open: openPicture, closed: closedPicture,
+                                              closedCenter: (closedFrom, closedEnd), growth: growth, turns: turns,
+                                              over: window) { [weak self] in
+                        guard let self, let animation, self.foldAnimation === animation else { return }
+                        let end = { [weak self] in
+                            guard let self, self.foldAnimation === animation else { return }
+                            self.foldEndWaiting = nil
+                            self.foldAnimation = nil
+                            self.folding = false
+                            self.foldEnded(turns: turns, center: landed)
+                            self.unfoldsTo = closed ? self.deviceCenterOnScreen.map { ($0, center) } : nil
+                            animation.finish()
+                        }
+                        // The live view would show a dark display until the new one's first frame: the animation's
+                        // last picture stays a moment longer instead.
+                        if self.showsLiveState {
+                            end()
+                        } else {
+                            self.foldEndWaiting = end
+                            DispatchQueue.main.asyncAfter(deadline: .now() + 1.5) { end() }
+                        }
+                    }
+                    self.foldAnimation = animation
+                    // The window, and with it the bars, takes the new state's size along with the fold.
+                    if let animation { window.setBox(finalBox, duration: FoldAnimation.foldDuration, start: animation.start) }
+                }
+            }
+        }
+    }
+
+    /// Whether a frame is all but black, as the first ones of a display the emulator has just switched to are.
+    nonisolated private static func isBlank(_ surface: IOSurface) -> Bool {
+        surface.lock(options: .readOnly, seed: nil)
+        defer { surface.unlock(options: .readOnly, seed: nil) }
+        let base = surface.baseAddress.assumingMemoryBound(to: UInt8.self)
+        let width = surface.width, height = surface.height, row = surface.bytesPerRow
+        // An 8 × 8 grid of samples is plenty: the status bar alone has bright pixels.
+        for y in stride(from: height / 16, to: height, by: max(1, height / 8)) {
+            for x in stride(from: width / 16, to: width, by: max(1, width / 8)) {
+                let pixel = base + y * row + x * 4
+                if pixel[0] > 12 || pixel[1] > 12 || pixel[2] > 12 { return false }
+            }
+        }
+        return true
+    }
+
+    /// A frame as an image, for the fold animation's pictures; on any thread.
+    nonisolated private static func image(of surface: IOSurface) -> CGImage? {
+        let image = CIImage(ioSurface: surface)
+        return imageContext.createCGImage(image, from: image.extent)
+    }
+
+    nonisolated private static let imageContext = CIContext(options: [.cacheIntermediates: false])
+
+    /// Shows the live device again where and as the animation left it: held at the turn the emulator was asked
+    /// for, which frames confirm shortly if they have not yet.
+    private func foldEnded(turns: Int, center: CGPoint) {
+        guard let view = deviceView else { return }
+        window?.stopBoxAnimation()
+        if turns != deviceTurns {
+            deviceTurns = turns
+            view.setQuarterTurns(turns, animated: false)
+        }
+        placeDevice(center: center)
+        view.isHidden = false
+        if lastRotation != deviceTurns { deviceTurned(to: lastRotation) }
+    }
+
+    /// Where a device of `device` points centred at `center` ends up once its window is kept on `screen`.
+    private func fittedCenter(device: CGSize, center: CGPoint, on screen: NSScreen?) -> CGPoint {
+        let box = DeviceShellView.boxSize(device: device)
+        let frame = CGRect(x: center.x - box.width / 2, y: center.y - device.height / 2 - DeviceShellView.bottomRoom,
+                           width: box.width, height: box.height)
+        let fitted = DeviceWindow.fitted(frame, on: screen)
+        return CGPoint(x: center.x + fitted.minX - frame.minX, y: center.y + fitted.minY - frame.minY)
+    }
+
+    /// While folding, the first live frame of the state being entered replaces its picture in the animation;
+    /// drawn elsewhere, like the pictures, so the window's resizing is not held up.
+    private func showLiveFold(folded: Bool) {
+        guard let animation = foldAnimation, !animation.showsLiveTarget, !liveTargetDrawing, animation.closing == folded,
+              let surface = lastSurface, !Self.isBlank(surface), let view = deviceView else { return }
+        liveTargetDrawing = true
+        let skin = folded ? closedSkin ?? openSkin : openSkin
+        let size = view.size(forQuarterTurns: 0, skin: skin, scale: view.scale)
+        let scale = pictureScale, turns = lastRotation
+        IOSurfaceIncrementUseCount(surface)
+        DispatchQueue.global(qos: .userInteractive).async { [weak self] in
+            let screen = Self.image(of: surface)
+            IOSurfaceDecrementUseCount(surface)
+            let picture = screen.flatMap { FoldAnimation.picture(skin: skin, screen: $0, screenTurns: turns, size: size, scale: scale) }
+            DispatchQueue.main.async {
+                MainActor.assumeIsolated {
+                    self?.liveTargetDrawing = false
+                    guard let picture, let current = self?.foldAnimation, current === animation else { return }
+                    animation.showLiveTarget(picture)
+                }
+            }
+        }
+    }
+
+    /// The device's centre on screen.
+    private var deviceCenterOnScreen: CGPoint? {
+        guard let window, let shell else { return nil }
+        let frame = window.convertToScreen(shell.convert(shell.deviceFrame, to: nil))
+        return CGPoint(x: frame.midX, y: frame.midY)
+    }
+
+    /// Moves and sizes the window so the device's centre is at `center` (screen coordinates), keeping it on screen.
+    private func placeDevice(center: CGPoint) {
+        guard let window, let view = deviceView else { return }
+        let screen = window.screen ?? NSScreen.main
+        let scale = shownScale(turns: deviceTurns, on: screen)
+        if scale != view.scale {
+            view.setLiveScale(scale)
+            view.commitScale()
+        }
+        window.setBox(boxFrame(device: view.size(forQuarterTurns: deviceTurns), center: center, on: screen), display: true)
         shell?.needsLayout = true
         commitSize()
+    }
+
+    /// The box for a device of `device` points centred at `center`, kept on `screen`.
+    private func boxFrame(device: CGSize, center: CGPoint, on screen: NSScreen?) -> CGRect {
+        let box = DeviceShellView.boxSize(device: device)
+        // The device sits `bottomRoom` above the box's bottom edge, centred across it.
+        let frame = CGRect(x: (center.x - box.width / 2).rounded(), y: (center.y - device.height / 2 - DeviceShellView.bottomRoom).rounded(),
+                           width: box.width, height: box.height)
+        return DeviceWindow.fitted(frame, on: screen)
     }
 
     // MARK: - Screenshot
@@ -631,6 +1041,16 @@ final class DeviceSession {
     }
 }
 
+/// A running device's latest frame as the device manager's preview shows it.
+struct DeviceThumbnail {
+    /// Upright for the viewer, like the frames.
+    let screen: CGImage
+    /// Counterclockwise quarter turns the device is held at.
+    let quarterTurns: Int
+    /// The skin shown instead of the AVD's own, e.g. a foldable's closed one.
+    let skinFolder: URL?
+}
+
 /// A menu item that runs a closure, for menus whose items are built from data.
 final class ClosureMenuItem: NSMenuItem {
     private let handler: () -> Void
@@ -657,6 +1077,17 @@ private final class FrameCounter: @unchecked Sendable {
     private var dropped = 0
     private var lastSeq: UInt32?
     private var windowStart = Date()
+    private var lastShape: (width: Int, height: Int, rotation: Int)?
+
+    /// Logs each change of the frames' size or reported rotation.
+    func noteShape(_ frame: RawFrame) {
+        lock.lock()
+        defer { lock.unlock() }
+        let shape = (width: frame.width, height: frame.height, rotation: frame.rotation)
+        guard lastShape.map({ $0 != shape }) ?? true else { return }
+        lastShape = shape
+        Log.debug("frames now \(frame.width)x\(frame.height), rotation \(frame.rotation)")
+    }
 
     func tick(_ frame: RawFrame, shown: Bool) {
         lock.lock()

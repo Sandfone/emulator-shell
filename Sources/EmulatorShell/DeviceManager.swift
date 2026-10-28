@@ -142,7 +142,7 @@ final class DeviceManager {
         images.first { $0.sysdir == avd.sysdir || $0.sysdir == (avd.sysdir ?? "") + "/" }
     }
 
-    func thumbnail(of avd: Avd) -> CGImage? {
+    func thumbnail(of avd: Avd) -> DeviceThumbnail? {
         sessions[avd.id]?.thumbnail()
     }
 
@@ -399,7 +399,7 @@ final class DeviceManager {
             }
         }
         if creating, config["skin.path"] == nil || config["skin.name"] == nil,
-           let skin = deviceTypes.first(where: { $0.id == form.deviceTypeId })?.skinFolder {
+           let skin = deviceTypes.first(where: { $0.id == form.deviceTypeId })?.skinPath {
             config["skin.name"] = skin.lastPathComponent
             config["skin.path"] = skin.path
             config["showDeviceFrame"] = "yes"
@@ -500,6 +500,13 @@ final class DeviceManager {
     }
 
     // MARK: - Quitting
+
+    var hasSessions: Bool { !sessions.isEmpty }
+
+    /// Shuts every device down, saving snapshots, and calls `done` once all emulators have exited.
+    func stopAllSessions(then done: @escaping () -> Void) {
+        DeviceSession.stopAll(Array(sessions.values), then: done)
+    }
 
     func stopAllSessions() {
         DeviceSession.stopAll(Array(sessions.values))

@@ -1,4 +1,5 @@
 import AppKit
+import ObjectiveC
 import SwiftUI
 
 /// The controls around the device, inside its window: Back / Home / Recents in a pill under the device,
@@ -6,7 +7,7 @@ import SwiftUI
 /// device's top. The window keeps room for both, so its size is the size of everything it shows.
 @MainActor
 final class DeviceChrome: NSObject, NSPopoverDelegate {
-    enum Action { case screenshot, rotateLeft, rotateRight }
+    enum Action { case close, minimize, screenshot, rotateLeft, rotateRight, toggleFold }
 
     /// A device key went down (`true`) or up; the key is a W3C key name.
     var onKey: ((_ key: String, _ pressed: Bool) -> Void)?
@@ -16,8 +17,6 @@ final class DeviceChrome: NSObject, NSPopoverDelegate {
 
     static let barHeight: CGFloat = 44
     static let gap: CGFloat = 12
-    /// Below this the title bar's buttons and name no longer fit; the window is then wider than the device.
-    static let titleMinWidth: CGFloat = 300
     private static let pillWidth: CGFloat = 120
     /// How far into the device the hover band reaches; with the title bar's room it is 140 pt tall.
     private static let bandDepth: CGFloat = 84
@@ -30,6 +29,8 @@ final class DeviceChrome: NSObject, NSPopoverDelegate {
     private let hud = GlassView(cornerRadius: 14)
     private let hudLabel = NSTextField(labelWithString: "")
     private var titleButtons: [ToolbarButton] = []
+    /// The device's name and details at the title bar's leading edge.
+    private var titleLabels: [NSTextField] = []
     private var navButtons: [ToolbarButton] = []
     private let navStack = NSStackView()
     private let bootLabel = NSTextField(labelWithString: "正在启动…")
@@ -43,12 +44,22 @@ final class DeviceChrome: NSObject, NSPopoverDelegate {
     private var showTimer: Timer?
     private var hideTimer: Timer?
     private var titleVisible = false
+    /// Shown whatever the pointer does, while a drag holds the window against the top of the screen.
+    private var titleHeld = false
     /// While the window is being resized the title bar stays away and the size readout takes its place.
     private var resizing = false
+    /// The box the bars are placed around, in the container's coordinates.
+    private var box = CGRect.zero
+    private let foldable: Bool
+    private var foldButton: ToolbarButton?
+    /// The title bar's buttons that may be left out on a narrow device, in the order they go.
+    private var droppableButtons: [[ToolbarButton]] = []
 
-    init(container: NSView, deviceName: String, subtitle: String) {
+    /// `foldable` adds a button that folds and unfolds the device.
+    init(container: NSView, deviceName: String, subtitle: String, foldable: Bool = false) {
         self.container = container
         self.deviceName = deviceName
+        self.foldable = foldable
         super.init()
         buildTitleBar(subtitle: subtitle)
         buildPill()
@@ -82,13 +93,14 @@ final class DeviceChrome: NSObject, NSPopoverDelegate {
         popover?.close()
     }
 
-    /// Places the bars around `device` (container coordinates); the container is the whole window.
-    func layout(device: CGRect) {
-        guard let bounds = container?.bounds else { return }
-        titleBar.frame = titleFrame(in: bounds, visible: titleVisible)
-        pill.frame = CGRect(x: (bounds.midX - Self.pillWidth / 2).rounded(), y: 0, width: Self.pillWidth, height: Self.barHeight)
-        let hudWidth = max(150, ceil(hudLabel.intrinsicContentSize.width) + 28)
-        hud.frame = CGRect(x: (bounds.midX - hudWidth / 2).rounded(), y: bounds.maxY - Self.barHeight, width: hudWidth, height: 32)
+    /// Places the bars in `box` around `device` (both in the container's coordinates).
+    func layout(device: CGRect, box: CGRect) {
+        self.box = box
+        fitTitleBar(width: box.width)
+        titleBar.frame = titleFrame(visible: titleVisible)
+        pill.frame = CGRect(x: (box.midX - Self.pillWidth / 2).rounded(), y: box.minY, width: Self.pillWidth, height: Self.barHeight)
+        let hudWidth = min(max(150, ceil(hudLabel.intrinsicContentSize.width) + 28), box.width)
+        hud.frame = CGRect(x: (box.midX - hudWidth / 2).rounded(), y: box.maxY - Self.barHeight, width: hudWidth, height: 32)
         if let toast {
             let width = toast.frame.width
             toast.frame = CGRect(x: (device.midX - width / 2).rounded(), y: device.maxY - 96, width: width, height: 36)
@@ -107,6 +119,17 @@ final class DeviceChrome: NSObject, NSPopoverDelegate {
         showTimer?.invalidate()
         showTimer = nil
         if popover?.isShown != true { setTitleVisible(false) }
+    }
+
+    /// Shows the title bar while a drag has the window's top against the top of the screen: the window goes no
+    /// higher, so the pointer cannot reach the band that shows it, and the bar would otherwise go unnoticed.
+    /// Released, it hides unless the pointer is in that band.
+    func holdTitleBar(_ hold: Bool) {
+        guard hold != titleHeld else { return }
+        titleHeld = hold
+        showTimer?.invalidate()
+        showTimer = nil
+        setTitleVisible(pointerInZone)
     }
 
     /// Shows `text` where the title bar goes while the window is resized; nil hides it shortly after.
@@ -179,6 +202,7 @@ final class DeviceChrome: NSObject, NSPopoverDelegate {
         detail.font = .systemFont(ofSize: 11)
         detail.textColor = .secondaryLabelColor
         detail.lineBreakMode = .byTruncatingTail
+        titleLabels = [name, detail]
         let labels = NSStackView(views: [name, detail])
         labels.orientation = .vertical
         labels.alignment = .leading
@@ -188,25 +212,30 @@ final class DeviceChrome: NSObject, NSPopoverDelegate {
         name.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
         detail.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
 
-        titleButtons = [
-            actionButton("camera", "截图", "⌘S", .screenshot),
-            actionButton("rotate.left", "向左旋转", "⌘←", .rotateLeft),
-            actionButton("rotate.right", "向右旋转", "⌘→", .rotateRight),
-            keyButton("speaker.wave.1", "音量 −", "⌥⌘↓", "AudioVolumeDown", size: 32),
-            keyButton("speaker.wave.3", "音量 +", "⌥⌘↑", "AudioVolumeUp", size: 32),
-            keyButton("power", "电源", "⌘L", "Power", size: 32),
-        ]
+        let screenshot = actionButton("camera", "截图", "⌘S", .screenshot)
+        let rotate = [actionButton("rotate.left", "向左旋转", "⌘←", .rotateLeft),
+                      actionButton("rotate.right", "向右旋转", "⌘→", .rotateRight)]
+        let volume = [keyButton("speaker.wave.1", "音量 −", "⌥⌘↓", "AudioVolumeDown", size: 32),
+                      keyButton("speaker.wave.3", "音量 +", "⌥⌘↑", "AudioVolumeUp", size: 32)]
+        let power = keyButton("power", "电源", "⌘L", "Power", size: 32)
+        let fold = foldable ? actionButton(Self.foldSymbol, "折叠", "⇧⌘F", .toggleFold) : nil
+        foldButton = fold
+        titleButtons = [screenshot] + rotate + (fold.map { [$0] } ?? []) + volume + [power]
+        droppableButtons = [volume, [power], rotate, fold.map { [$0] } ?? [], [screenshot]]
         let more = ToolbarButton(symbol: "ellipsis", label: "更多功能", shortcut: nil, size: 32)
         more.onPress = { [weak self] pressed in if pressed { self?.toggleMore() } }
         moreButton = more
         titleButtons.append(more)
+        // At the leading edge, where a window's are; enabled while the device boots too.
+        let windowButtons = WindowButtons { [weak self] action in self?.onAction?(action) }
 
-        let stack = NSStackView(views: [labels] + titleButtons)
+        let stack = NSStackView(views: [windowButtons, labels] + titleButtons)
         stack.orientation = .horizontal
         // The labels take up the slack so the buttons stay at the trailing edge in a landscape-wide bar.
         stack.distribution = .fill
         stack.spacing = 2
         stack.edgeInsets = NSEdgeInsets(top: 0, left: 14, bottom: 0, right: 6)
+        stack.setCustomSpacing(12, after: windowButtons)
         stack.setCustomSpacing(8, after: labels)
         titleBar.content.addSubview(stack)
         pin(stack, to: titleBar.content)
@@ -247,6 +276,41 @@ final class DeviceChrome: NSObject, NSPopoverDelegate {
         ])
     }
 
+    /// The bar is as wide as the device, so on a small one what does not fit is left out: first the name,
+    /// then the volume keys and power (also on the frame's side buttons and in the Device menu), then the
+    /// rotate buttons, then fold, then screenshot. The window buttons and "More" always stay. The labels'
+    /// stack stays as the flexible space that keeps the buttons at the trailing edge.
+    private func fitTitleBar(width: CGFloat) {
+        var hidden: [ToolbarButton] = []
+        var showsLabels = true
+        func needed() -> CGFloat {
+            let buttons = CGFloat(titleButtons.count - hidden.count)
+            return 14 + WindowButtons.width + 12 + (showsLabels ? 50 + 8 : 0) + buttons * 32 + (buttons - 1) * 2 + 6
+        }
+        if needed() > width { showsLabels = false }
+        for group in droppableButtons where needed() > width { hidden += group }
+        titleLabels.forEach { $0.isHidden = !showsLabels }
+        for button in titleButtons { button.isHidden = hidden.contains { $0 === button } }
+    }
+
+    /// The fold button offers what the device's posture allows: folding while open, unfolding while closed.
+    func setFolded(_ folded: Bool) {
+        foldButton?.update(symbol: folded ? Self.unfoldSymbol : Self.foldSymbol, label: folded ? "展开" : "折叠", shortcut: "⇧⌘F")
+    }
+
+    private static let foldSymbol = "arrow.right.and.line.vertical.and.arrow.left"
+    private static let unfoldSymbol = "arrow.left.and.line.vertical.and.arrow.right"
+
+    private func pin(_ view: NSView, to container: NSView) {
+        view.translatesAutoresizingMaskIntoConstraints = false
+        NSLayoutConstraint.activate([
+            view.leadingAnchor.constraint(equalTo: container.leadingAnchor),
+            view.trailingAnchor.constraint(equalTo: container.trailingAnchor),
+            view.topAnchor.constraint(equalTo: container.topAnchor),
+            view.bottomAnchor.constraint(equalTo: container.bottomAnchor),
+        ])
+    }
+
     private func keyButton(_ symbol: String, _ label: String, _ shortcut: String, _ key: String, size: CGFloat) -> ToolbarButton {
         let button = ToolbarButton(symbol: symbol, label: label, shortcut: shortcut, size: size)
         button.onPress = { [weak self] pressed in self?.onKey?(key, pressed) }
@@ -259,27 +323,18 @@ final class DeviceChrome: NSObject, NSPopoverDelegate {
         return button
     }
 
-    private func pin(_ view: NSView, to container: NSView) {
-        view.translatesAutoresizingMaskIntoConstraints = false
-        NSLayoutConstraint.activate([
-            view.leadingAnchor.constraint(equalTo: container.leadingAnchor),
-            view.trailingAnchor.constraint(equalTo: container.trailingAnchor),
-            view.topAnchor.constraint(equalTo: container.topAnchor),
-            view.bottomAnchor.constraint(equalTo: container.bottomAnchor),
-        ])
-    }
-
-    private func titleFrame(in bounds: CGRect, visible: Bool) -> CGRect {
-        CGRect(x: 0, y: bounds.maxY - Self.barHeight + (visible ? 0 : Self.revealOffset), width: bounds.width, height: Self.barHeight)
+    private func titleFrame(visible: Bool) -> CGRect {
+        CGRect(x: box.minX, y: box.maxY - Self.barHeight + (visible ? 0 : Self.revealOffset), width: box.width, height: Self.barHeight)
     }
 
     // MARK: - Hover
 
     private var pointerInZone: Bool {
-        guard let window = container?.window, NSApp.isActive, !resizing else { return false }
+        if titleHeld { return true }
+        guard let container, let window = container.window, NSApp.isActive, !resizing else { return false }
         if popover?.isShown == true { return true }
         // The title bar's room plus the top of the device, in screen coordinates.
-        let frame = window.frame
+        let frame = window.convertToScreen(container.convert(box, to: nil))
         let band = CGRect(x: frame.minX, y: frame.maxY - Self.barHeight - Self.gap - Self.bandDepth,
                           width: frame.width, height: Self.barHeight + Self.gap + Self.bandDepth)
         return band.contains(NSEvent.mouseLocation)
@@ -315,11 +370,11 @@ final class DeviceChrome: NSObject, NSPopoverDelegate {
     private func setTitleVisible(_ visible: Bool, animated: Bool = true) {
         hideTimer?.invalidate()
         hideTimer = nil
-        guard visible != titleVisible, let bounds = container?.bounds else { return }
+        guard visible != titleVisible else { return }
         titleVisible = visible
         // A hidden bar must not take clicks in the empty room it leaves.
         if visible { titleBar.isHidden = false }
-        let target = titleFrame(in: bounds, visible: visible)
+        let target = titleFrame(visible: visible)
         NSAnimationContext.runAnimationGroup({ context in
             context.duration = animated ? (visible ? 0.16 : 0.12) : 0
             titleBar.animator().alphaValue = visible ? 1 : 0
@@ -437,6 +492,103 @@ final class GlassView: NSView {
     required init?(coder: NSCoder) { fatalError() }
 }
 
+/// The standard close, minimize and zoom buttons, as at the leading edge of a titled window's title bar. Zoom
+/// is greyed out: a device window has no full screen, and its sizes are in the Window menu.
+final class WindowButtons: NSView {
+    static let width: CGFloat = 14 * 3 + 2 * spacing
+    private static let spacing: CGFloat = 6
+
+    private let onAction: (DeviceChrome.Action) -> Void
+    private var isPointerInside = false
+    private var buttons: [NSButton] = []
+
+    init(onAction: @escaping (DeviceChrome.Action) -> Void) {
+        self.onAction = onAction
+        super.init(frame: .zero)
+        let kinds: [(NSWindow.ButtonType, Selector?)] = [
+            (.closeButton, #selector(close)), (.miniaturizeButton, #selector(minimize)), (.zoomButton, nil),
+        ]
+        var x: CGFloat = 0
+        for (kind, action) in kinds {
+            guard let button = NSWindow.standardWindowButton(kind, for: [.titled, .closable, .miniaturizable, .resizable]) else { continue }
+            button.target = self
+            button.action = action
+            button.isEnabled = action != nil
+            Self.showSymbolsOnHover(button)
+            button.setFrameOrigin(CGPoint(x: x, y: 0))
+            x += button.frame.width + Self.spacing
+            addSubview(button)
+            buttons.append(button)
+        }
+        let height = buttons.map(\.frame.height).max() ?? 16
+        translatesAutoresizingMaskIntoConstraints = false
+        NSLayoutConstraint.activate([
+            widthAnchor.constraint(equalToConstant: Self.width),
+            heightAnchor.constraint(equalToConstant: height),
+        ])
+    }
+
+    @available(*, unavailable)
+    required init?(coder: NSCoder) { fatalError() }
+
+    @objc private func close() { onAction(.close) }
+    @objc private func minimize() { onAction(.minimize) }
+
+    /// Before macOS 26 the buttons ask their superview through this whether to show their symbols, which a
+    /// title bar does while the pointer is over any of them.
+    @objc func _mouseInGroup(_ button: NSButton) -> Bool { isPointerInside }
+
+    /// From macOS 26 a button's cell asks the title bar it sits in instead (`_bezelInteractionState`, through
+    /// `+[NSThemeFrame containingThemeFrameFromView:]`), and outside one the answer is never "rolled over". So the
+    /// cell becomes a subclass that gives that state itself while the pointer is over the group: 4 shows the
+    /// symbols, 2 is pressed. A disabled button keeps the system's answer, so zoom stays grey as in a title bar.
+    private static func showSymbolsOnHover(_ button: NSButton) {
+        let selector = NSSelectorFromString("_bezelInteractionState")
+        guard let cell = button.cell, let base = object_getClass(cell),
+              let method = class_getInstanceMethod(base, selector) else { return }
+        let name = "EmulatorShell_" + String(cString: class_getName(base))
+        if let subclass = objc_lookUpClass(name) {
+            object_setClass(cell, subclass)
+            return
+        }
+        guard let subclass = objc_allocateClassPair(base, name, 0) else { return }
+        let system = unsafeBitCast(method_getImplementation(method), to: (@convention(c) (AnyObject, Selector) -> Int).self)
+        let state: @convention(block) (NSButtonCell) -> Int = { cell in
+            MainActor.assumeIsolated {
+                guard cell.isEnabled, (cell.controlView?.superview as? WindowButtons)?.isPointerInside == true else {
+                    return system(cell, selector)
+                }
+                return cell.isHighlighted ? 2 : 4
+            }
+        }
+        class_addMethod(subclass, selector, imp_implementationWithBlock(state), method_getTypeEncoding(method))
+        objc_registerClassPair(subclass)
+        object_setClass(cell, subclass)
+    }
+
+    override func updateTrackingAreas() {
+        super.updateTrackingAreas()
+        trackingAreas.forEach(removeTrackingArea)
+        addTrackingArea(NSTrackingArea(rect: .zero, options: [.mouseEnteredAndExited, .activeAlways, .inVisibleRect], owner: self))
+    }
+
+    override func mouseEntered(with event: NSEvent) { setPointerInside(true) }
+    override func mouseExited(with event: NSEvent) { setPointerInside(false) }
+
+    private func setPointerInside(_ inside: Bool) {
+        isPointerInside = inside
+        // The cell keeps the look it worked out until something about the button changes.
+        for button in buttons {
+            let enabled = button.isEnabled
+            button.isEnabled = !enabled
+            button.isEnabled = enabled
+            button.needsDisplay = true
+        }
+    }
+
+    override func acceptsFirstMouse(for event: NSEvent?) -> Bool { true }
+}
+
 /// Background of a glass surface: dragging it moves the device window.
 final class DragView: NSView {
     override func acceptsFirstMouse(for event: NSEvent?) -> Bool { true }
@@ -473,7 +625,8 @@ final class ToolbarButton: NSView {
         didSet { updateBackground() }
     }
 
-    private let label: String
+    private var label: String
+    private let imageView = NSImageView()
     private var isHovered = false
     private var isPressed = false
 
@@ -483,7 +636,7 @@ final class ToolbarButton: NSView {
         wantsLayer = true
         layer?.cornerRadius = size == 36 ? size / 2 : 9
 
-        let image = NSImageView()
+        let image = imageView
         image.image = NSImage(systemSymbolName: symbol, accessibilityDescription: label)
         image.symbolConfiguration = NSImage.SymbolConfiguration(pointSize: 15, weight: .regular)
         image.contentTintColor = .labelColor
@@ -503,6 +656,14 @@ final class ToolbarButton: NSView {
 
     @available(*, unavailable)
     required init?(coder: NSCoder) { fatalError() }
+
+    /// Shows another symbol and name, for a button whose action changes with the device's state.
+    func update(symbol: String, label: String, shortcut: String?) {
+        self.label = label
+        imageView.image = NSImage(systemSymbolName: symbol, accessibilityDescription: label)
+        toolTip = shortcut.map { "\(label)  \($0)" } ?? label
+        setAccessibilityLabel(label)
+    }
 
     override func acceptsFirstMouse(for event: NSEvent?) -> Bool { true }
 

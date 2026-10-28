@@ -43,6 +43,8 @@ final class DeviceControls {
     let deviceName: String
     /// Only devices with a hinge sensor (foldables) accept postures.
     let isFoldable: Bool
+    /// The postures the device defines (`hw.sensor.posture_list`); the emulator refuses the others.
+    let postures: [PostureValue]
 
     var latitude = ""
     var longitude = ""
@@ -70,6 +72,9 @@ final class DeviceControls {
         self.client = client
         deviceName = avd.name
         isFoldable = avd.config["hw.sensor.hinge"] == "yes"
+        let listed = (avd.config["hw.sensor.posture_list"] ?? "").split(separator: ",")
+            .compactMap { Int($0.trimmingCharacters(in: .whitespaces)).flatMap(PostureValue.init(rawValue:)) }
+        postures = listed.isEmpty ? [.postureClosed, .postureHalfOpened, .postureOpened, .postureFlipped, .postureTent] : listed
         self.clipboardSync = clipboardSync
     }
 

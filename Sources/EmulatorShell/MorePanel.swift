@@ -316,7 +316,7 @@ private struct PosturePage: View {
 
     var body: some View {
         Picker("姿态", selection: Binding(get: { controls.posture }, set: { value in Task { await controls.setPosture(value) } })) {
-            ForEach([PostureValue.postureClosed, .postureHalfOpened, .postureOpened, .postureFlipped, .postureTent], id: \.self) {
+            ForEach(controls.postures, id: \.self) {
                 Text(postureName($0)).tag($0)
             }
         }

@@ -65,10 +65,14 @@ struct DeviceType: Identifiable, Hashable {
     let oem: String
     let category: DeviceCategory
 
-    var skinFolder: URL? {
+    /// The SDK's skin for this device, as an AVD's `skin.path` names it.
+    var skinPath: URL? {
         let folder = Sdk.root.appendingPathComponent("skins/\(id)")
-        return FileManager.default.fileExists(atPath: folder.appendingPathComponent("layout").path) ? folder : nil
+        return Sdk.skinArtwork(in: folder) != nil ? folder : nil
     }
+
+    /// Where that skin's `layout` and images are.
+    var skinFolder: URL? { skinPath.flatMap(Sdk.skinArtwork) }
 
     static func load() async throws -> [DeviceType] {
         parse(try await Sdk.run("avdmanager", ["list", "device"]))
@@ -278,10 +282,17 @@ struct Avd: Identifiable, Hashable {
         guard let width = config["hw.lcd.width"], let height = config["hw.lcd.height"] else { return nil }
         return "\(width) × \(height)" + (config["hw.lcd.density"].map { " · \($0) dpi" } ?? "")
     }
+    /// Where the skin's `layout` and images are.
     var skinFolder: URL? {
         guard let path = config["skin.path"] else { return nil }
-        let folder = path.hasPrefix("/") ? URL(fileURLWithPath: path) : Sdk.root.appendingPathComponent(path)
-        return FileManager.default.fileExists(atPath: folder.appendingPathComponent("layout").path) ? folder : nil
+        return Sdk.skinArtwork(in: path.hasPrefix("/") ? URL(fileURLWithPath: path) : Sdk.root.appendingPathComponent(path))
+    }
+    /// A foldable skin's artwork for the outer display, shown while the device is closed: `closed` beside
+    /// the `default` folder (Pixel Fold models).
+    var closedSkinFolder: URL? {
+        guard let folder = skinFolder, folder.lastPathComponent == "default" else { return nil }
+        let closed = folder.deletingLastPathComponent().appendingPathComponent("closed")
+        return Sdk.skinArtwork(in: closed) == closed ? closed : nil
     }
 
     static func loadAll() -> [Avd] {

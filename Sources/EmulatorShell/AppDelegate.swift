@@ -8,6 +8,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
     private let emulatorArguments: [String]
     private let manager = DeviceManager()
     private var managerWindow: NSWindow?
+    private var quitting = false
 
     init(launchAvd: String?, emulatorArguments: [String] = []) {
         self.launchAvd = launchAvd
@@ -31,7 +32,19 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
 
     /// Opened for a single device, the app ends with it; otherwise the manager keeps it running.
     func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool {
-        launchAvd != nil
+        launchAvd != nil && !quitting
+    }
+
+    /// Quitting waits for the emulators to save their snapshots, which takes seconds; the windows go at
+    /// once and the app stays responsive meanwhile.
+    func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
+        // A second request while the first waits (another ⌘Q) changes nothing.
+        if quitting { return .terminateCancel }
+        guard manager.hasSessions else { return .terminateNow }
+        quitting = true
+        managerWindow?.orderOut(nil)
+        manager.stopAllSessions { sender.reply(toApplicationShouldTerminate: true) }
+        return .terminateLater
     }
 
     func applicationShouldHandleReopen(_ sender: NSApplication, hasVisibleWindows flag: Bool) -> Bool {
@@ -250,7 +263,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
             menuItem.title = EmulatorForwarder.isCommandInstalled ? "移除命令行工具 emulator-shell" : "安装命令行工具 emulator-shell"
             return EmulatorForwarder.commandLink != nil
         }
-        if menuItem.action == #selector(runDeviceCommand(_:)) { return currentSession?.state == .running }
+        if menuItem.action == #selector(runDeviceCommand(_:)) {
+            guard let session = currentSession, let command = menuItem.representedObject as? DeviceCommand else { return false }
+            return session.state == .running && session.isAvailable(command)
+        }
         if menuItem.action == #selector(zoomDevice(_:)), let zoom = menuItem.representedObject as? DeviceZoom {
             return currentSession?.canZoom(zoom) ?? false
         }

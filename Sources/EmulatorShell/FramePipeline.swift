@@ -13,6 +13,8 @@ struct RawFrame {
     let timestampUs: UInt64
     /// Quarter turns the device is held at (`Rotation.SkinRotation`); the pixels are already upright for the viewer.
     let rotation: Int
+    /// Whether a foldable is folded and this is its outer display.
+    let folded: Bool
     /// Only valid for the duration of the callback it is passed to.
     let pixels: UnsafeRawPointer
 }

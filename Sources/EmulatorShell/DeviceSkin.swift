@@ -374,3 +374,18 @@ struct LayoutNode {
         return node
     }
 }
+
+extension DeviceSkin {
+    /// How far in from each corner of the skin the device's body starts, measured along the diagonal (in skin
+    /// pixels per axis): where a rounded phone's visible corner is. Clockwise from the top left.
+    func cornerInsets() -> [CGFloat] {
+        guard let buffer = try? RGBABuffer(image: frame, width: frame.width, height: frame.height) else { return [0, 0, 0, 0] }
+        let right = buffer.width - 1, bottom = buffer.height - 1
+        let corners = [(0, 0, 1, 1), (right, 0, -1, 1), (right, bottom, -1, -1), (0, bottom, 1, -1)]
+        let limit = min(buffer.width, buffer.height) / 2
+        return corners.map { x, y, dx, dy in
+            let steps = (0..<limit).first { buffer.alpha(x: x + $0 * dx, y: y + $0 * dy) > 128 } ?? 0
+            return CGFloat(steps) * size.width / CGFloat(buffer.width)
+        }
+    }
+}
