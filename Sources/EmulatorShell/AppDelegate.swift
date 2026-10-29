@@ -30,9 +30,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
         if let message = manager.errorMessage { fail(message) }
     }
 
-    /// Opened for a single device, the app ends with it; otherwise the manager keeps it running.
+    /// Opened for a single device, the app ends with it, unless it is only restarting; otherwise the
+    /// manager keeps it running.
     func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool {
-        launchAvd != nil && !quitting
+        launchAvd != nil && !quitting && !manager.isRestarting
     }
 
     /// Quitting waits for the emulators to save their snapshots, which takes seconds; the windows go at

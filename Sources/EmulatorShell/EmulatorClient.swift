@@ -176,6 +176,19 @@ final class EmulatorClient: Sendable {
         }
     }
 
+    /// Delivers the device's sound, 16-bit stereo samples at `sampleRate`, while it plays, until cancelled.
+    func streamAudio(sampleRate: Int, onSamples: @escaping @Sendable (Data) -> Void) async throws {
+        var format = Android_Emulation_Control_AudioFormat()
+        format.samplingRate = UInt64(sampleRate)
+        format.channels = .stereo
+        format.format = .audFmtS16
+        try await controller.streamAudio(format) { response in
+            for try await packet in response.messages {
+                onSamples(packet.audio)
+            }
+        }
+    }
+
     // MARK: - Device state, for the "More" panel. These throw so the panel can say what went wrong.
 
     func location() async throws -> (latitude: Double, longitude: Double) {

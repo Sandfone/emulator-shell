@@ -64,6 +64,8 @@ final class DeviceSession {
         didSet { onStateChange?(state) }
     }
     var onStateChange: ((State) -> Void)?
+    /// Asks for the device to be stopped and started again with the same arguments.
+    var onRestart: (() -> Void)?
     private(set) var window: DeviceWindow?
 
     private var emulator: EmulatorProcess?
@@ -114,6 +116,9 @@ final class DeviceSession {
     private var tasks: [Task<Void, Never>] = []
     private var streamTask: Task<Void, Never>?
     private var postureTask: Task<Void, Never>?
+    /// The device's sound, when this app plays it (see `DeviceAudio`).
+    private var audio: DeviceAudio?
+    private var audioTask: Task<Void, Never>?
     /// Device input, sent strictly in order: separate Tasks may run out of order and swap a key's down and up.
     private var input: AsyncStream<@Sendable () async -> Void>.Continuation?
     /// Counterclockwise quarter turns the emulator reports the device is held at.
@@ -206,6 +211,9 @@ final class DeviceSession {
         streamTask = nil
         postureTask?.cancel()
         postureTask = nil
+        audioTask?.cancel()
+        audioTask = nil
+        audio?.stop()
         clipboard?.stop()
     }
 
@@ -537,8 +545,16 @@ final class DeviceSession {
         // host GPU is used unless the AVD asks for software rendering.
         let software = ["swiftshader_indirect", "swiftshader", "swangle", "swangle_indirect", "lavapipe"]
         let gpu = software.contains(avd.config["hw.gpu.mode"] ?? "") ? "swiftshader_indirect" : "host"
+        // The emulator's own sound output can deadlock it (see `DeviceAudio`), so this app plays the sound,
+        // unless the arguments passed along already say what to do with it. Only the emulator's own audio
+        // reaches the Mac's microphone, so a device that uses it runs with that, and takes the risk.
+        let audioOptions: Set<String> = ["-audio", "-no-audio", "-noaudio"]
+        let choosesAudio = !extraArguments.contains(where: audioOptions.contains)
+        let usesMicrophone = choosesAudio && Self.usesMicrophone(avd)
+        if choosesAudio && !usesMicrophone { audio = DeviceAudio() }
+        let audioArguments = !choosesAudio ? [] : usesMicrophone ? ["-audio", "coreaudio", "-allow-host-audio"] : ["-audio", "none"]
         let emulator = EmulatorProcess(avdName: avd.id, grpcPort: grpcPort, gpu: gpu,
-                                       extraArguments: (coldBoot ? ["-no-snapshot-load"] : []) + extraArguments)
+                                       extraArguments: (coldBoot ? ["-no-snapshot-load"] : []) + audioArguments + extraArguments)
         emulator.onExit = { [weak self] in
             DispatchQueue.main.async { MainActor.assumeIsolated { self?.emulatorExited() } }
         }
@@ -551,6 +567,14 @@ final class DeviceSession {
         self.clipboard = clipboard
         let controls = DeviceControls(client: client, avd: avd, clipboardSync: clipboard.isEnabled)
         controls.onClipboardSync = { [weak clipboard] on in clipboard?.isEnabled = on }
+        if choosesAudio {
+            controls.usesMicrophone = usesMicrophone
+            controls.restartForMicrophone = { [weak self] on in
+                guard let self else { return }
+                UserDefaults.standard.set(on, forKey: Self.microphoneKey(self.avd))
+                self.onRestart?()
+            }
+        }
         chrome?.controls = controls
 
         tasks.append(Task { [weak self] in
@@ -560,6 +584,7 @@ final class DeviceSession {
                 }
                 self?.startStream(client: client)
                 self?.followPosture(client: client)
+                self?.playAudio(client: client)
                 while await !client.isBooted() {
                     try await Task.sleep(for: .seconds(1))
                 }
@@ -586,6 +611,8 @@ final class DeviceSession {
         tasks.forEach { $0.cancel() }
         streamTask?.cancel()
         postureTask?.cancel()
+        audioTask?.cancel()
+        audio?.stop()
         input?.finish()
         clipboard?.stop()
         client?.shutdown()
@@ -787,6 +814,25 @@ final class DeviceSession {
                 }
             } catch {
                 if !Task.isCancelled { Log.error("posture notifications ended: \(error)") }
+            }
+        }
+    }
+
+    /// Whether the device uses the Mac's microphone, which it hears only through the emulator's own audio.
+    static func usesMicrophone(_ avd: Avd) -> Bool {
+        UserDefaults.standard.bool(forKey: microphoneKey(avd))
+    }
+
+    private static func microphoneKey(_ avd: Avd) -> String { "microphone.\(avd.id)" }
+
+    private func playAudio(client: EmulatorClient) {
+        guard let audio else { return }
+        audioTask?.cancel()
+        audioTask = Task.detached {
+            do {
+                try await client.streamAudio(sampleRate: DeviceAudio.sampleRate) { audio.play($0) }
+            } catch {
+                if !Task.isCancelled { Log.error("audio stream ended: \(error)") }
             }
         }
     }

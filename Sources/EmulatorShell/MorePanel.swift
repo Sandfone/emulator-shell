@@ -45,6 +45,13 @@ struct MorePanel: View {
                 }
                 .padding(.horizontal, 4)
                 tiles
+                if controls.restartForMicrophone != nil && controls.usesMicrophone {
+                    Label("麦克风开着时，声音由模拟器自己播放，偶尔会让模拟器卡死并退出。", systemImage: "exclamationmark.triangle")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                        .fixedSize(horizontal: false, vertical: true)
+                        .padding(.horizontal, 4)
+                }
                 Divider()
                 // The emulator's own extended controls are Qt windows; a headless emulator has none, and asking
                 // UiController to show them makes it crash.
@@ -65,6 +72,16 @@ struct MorePanel: View {
         .padding(12)
         .frame(width: 300)
         .task { await controls.refresh() }
+        .alert(controls.confirmingMicrophone == true ? "打开麦克风需要重启设备" : "关闭麦克风需要重启设备",
+               isPresented: Binding(get: { controls.confirmingMicrophone != nil },
+                                    set: { if !$0 { controls.confirmingMicrophone = nil } })) {
+            Button(controls.confirmingMicrophone == true ? "重启并打开" : "重启并关闭") { controls.confirmMicrophoneRestart() }
+            Button("取消", role: .cancel) { controls.confirmingMicrophone = nil }
+        } message: {
+            Text(controls.confirmingMicrophone == true
+                 ? "设备会保存当前状态后重新启动。麦克风开着时，声音改由模拟器自己播放，这种方式偶尔会让模拟器卡死并退出。"
+                 : "设备会保存当前状态后重新启动，之后声音由 Emulator Shell 播放。")
+        }
     }
 
     private var tiles: some View {

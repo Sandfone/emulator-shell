@@ -65,7 +65,14 @@ final class DeviceControls {
     /// Whether the values above were read from the emulator, so the tiles can show them.
     var loaded = false
 
+    /// Asks before the device restarts to switch the microphone (see `restartForMicrophone`); the value
+    /// is whether it is being switched on.
+    var confirmingMicrophone: Bool?
+
     @ObservationIgnored var onClipboardSync: ((Bool) -> Void)?
+    /// Set when switching the microphone means restarting the device, with or without the emulator's own
+    /// audio (see `DeviceAudio`); called with whether it is to be on.
+    @ObservationIgnored var restartForMicrophone: ((Bool) -> Void)?
     @ObservationIgnored private let client: EmulatorClient
 
     init(client: EmulatorClient, avd: Avd, clipboardSync: Bool) {
@@ -91,7 +98,7 @@ final class DeviceControls {
             charger = battery.charger
         }
         if let value = try? await client.brightness() { brightness = Double(value) }
-        if let enabled = try? await client.usesHostMicrophone() { usesMicrophone = enabled }
+        if restartForMicrophone == nil, let enabled = try? await client.usesHostMicrophone() { usesMicrophone = enabled }
         await refreshSnapshots()
         loaded = true
     }
@@ -171,9 +178,20 @@ final class DeviceControls {
     }
 
     func setUsesMicrophone(_ enabled: Bool) async {
+        if restartForMicrophone != nil {
+            confirmingMicrophone = enabled
+            return
+        }
         usesMicrophone = enabled
         await run(enabled ? "设备现在使用 Mac 的麦克风。" : "已断开 Mac 的麦克风。") { try await $0.setUsesHostMicrophone(enabled) }
         if message?.isError == true { usesMicrophone = !enabled }
+    }
+
+    /// Restarts the device with the microphone switched as confirmed.
+    func confirmMicrophoneRestart() {
+        guard let enabled = confirmingMicrophone else { return }
+        confirmingMicrophone = nil
+        restartForMicrophone?(enabled)
     }
 
     func applyBrightness() async {

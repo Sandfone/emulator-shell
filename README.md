@@ -140,7 +140,7 @@ The ⋯ button in a device's title bar opens a panel of emulator features, all t
 | 剪贴板同步 | Two-way clipboard sync on or off | `streamClipboard` / `setClipboard` |
 | 来电与短信 | Incoming call, remote answer, hang up, hold; receive an SMS | `sendPhone` / `sendSms` |
 | 指纹 | One touch of finger 1 on the sensor | `sendFingerprint` |
-| 麦克风 | Route the Mac's microphone to the device | `setMicrophoneState` |
+| 麦克风 | Route the Mac's microphone to the device, restarting it with the emulator's own audio (see Sound) | `-audio coreaudio -allow-host-audio` |
 | 亮度 | Screen backlight | `setBrightness` / `getBrightness` |
 | 快照 | List, save, restore and delete snapshots | `SnapshotService` |
 | 折叠姿态 | The postures in the AVD's `hw.sensor.posture_list` (closed, half-open, open, flipped, tent); foldables only (`hw.sensor.hinge=yes`) | `setPosture` |
@@ -225,8 +225,33 @@ invalidates the quick-boot snapshot once, so the first launch after the switch c
 Sending pixels inside the gRPC messages instead (about 5 MB per frame) cannot keep up with a
 60 fps guest; the stream falls seconds behind.
 
+## Sound
+
+The emulator starts with `-audio none` and this app plays the device's sound: `streamAudio` delivers
+16-bit stereo at 48 kHz in packets of about 10 ms, silent ones included, and an `AVAudioPlayerNode`
+plays them with at most 100 ms queued (about 30 ms usually). The engine runs only while there is
+something to hear and stops after 2 s of silence, so a quiet device does not keep the Mac awake.
+
+The emulator's own CoreAudio output (emulator 37.2.12) can deadlock: a vCPU thread that starts a stream
+(`virtio_snd` → `AUD_set_active_out` → `AudioDeviceStart`) holds qemu's global lock and the backend's
+voice lock while it waits for CoreAudio's playback thread, which is itself waiting for that voice lock
+in `ca_out_device_wconv_ioproc`. The main loop and every vCPU stop, and after 15 s the emulator's hang
+detector kills the process. With `-audio none` there is no CoreAudio thread in the emulator to take
+part. Snapshots saved with the emulator's own audio load fine.
+
+Arguments passed along from Android Studio or the command line that already choose (`-audio …`,
+`-no-audio`) are kept, and this app then plays nothing.
+
+Only the emulator's own audio reaches the Mac's microphone: `-audio none` gives the guest silence, and
+feeding it over gRPC instead (`injectAudio`) crashes emulator 37.2.12 (`audio_forwarder_enable`, null
+pointer) as soon as the stream opens, whichever audio backend runs. So turning on 麦克风 in the "More"
+panel restarts the device with `-audio coreaudio -allow-host-audio` (after asking, and warning that this
+can hit the deadlock), and turning it off restarts it with `-audio none`. The choice is kept per device
+(`microphone.<avd>` in the app's defaults). A restart saves and loads the quick-boot snapshot, so it
+takes a few seconds.
+
 ## Not done yet
 
-- No scroll wheel, multi-touch or audio output.
+- No scroll wheel or multi-touch.
 - A foldable shows only the open or the closed display, not both at once (Pixel Fold's rear display
   mode), and the half-open posture is drawn as open.

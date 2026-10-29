@@ -80,6 +80,8 @@ final class DeviceManager {
     private(set) var sessionStates: [String: DeviceSession.State] = [:]
     private var external: [String: RunningEmulator] = [:]
     @ObservationIgnored private var sessions: [String: DeviceSession] = [:]
+    /// Devices being restarted, with the arguments they start again with once stopped.
+    @ObservationIgnored private var restarting: [String: [String]] = [:]
     @ObservationIgnored private var downloadTasks: [String: Task<Void, Never>] = [:]
     @ObservationIgnored private var availableImages: [SystemImage] = []
     @ObservationIgnored private var timer: Timer?
@@ -221,7 +223,15 @@ final class DeviceManager {
                     self.sessionStates[avd.id] = nil
                     self.refreshRunning()
                     self.measureSizes()
+                    if let arguments = self.restarting.removeValue(forKey: avd.id) {
+                        self.start(self.avds.first { $0.id == avd.id } ?? avd, extraArguments: arguments)
+                    }
                 }
+            }
+            session.onRestart = { [weak self, weak session] in
+                guard let self, let session else { return }
+                self.restarting[avd.id] = extraArguments
+                session.stop()
             }
             note = notes.isEmpty ? nil : notes.joined(separator: "\n")
         } catch {
@@ -502,6 +512,8 @@ final class DeviceManager {
     // MARK: - Quitting
 
     var hasSessions: Bool { !sessions.isEmpty }
+    /// Whether a device is between its two runs of a restart, with no window meanwhile.
+    var isRestarting: Bool { !restarting.isEmpty }
 
     /// Shuts every device down, saving snapshots, and calls `done` once all emulators have exited.
     func stopAllSessions(then done: @escaping () -> Void) {
