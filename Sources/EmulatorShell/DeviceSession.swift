@@ -154,9 +154,8 @@ final class DeviceSession {
         state = .stopping
         window?.orderOut(nil)
         closeStreams()
+        emulator?.interrupt()
         tasks.append(Task { [weak self] in
-            try? await Task.sleep(for: Self.streamsClosing)
-            self?.emulator?.interrupt()
             // Saving a snapshot has taken over 30 s here; only much later is the emulator considered stuck.
             try? await Task.sleep(for: .seconds(90))
             self?.emulator?.terminate()
@@ -172,9 +171,8 @@ final class DeviceSession {
             session.window?.orderOut(nil)
             session.closeStreams()
         }
+        stopping.forEach { $0.emulator?.interrupt() }
         Task {
-            try? await Task.sleep(for: streamsClosing)
-            stopping.forEach { $0.emulator?.interrupt() }
             // Saving a snapshot has taken over 30 s here; only much later is an emulator considered stuck.
             let deadline = ContinuousClock.now + .seconds(90)
             while sessions.contains(where: { $0.emulator?.isRunning == true }), ContinuousClock.now < deadline {
@@ -188,19 +186,12 @@ final class DeviceSession {
     /// The last resort when the app ends without `stopAll(_:then:)` having finished: waits on the main thread.
     static func stopAll(_ sessions: [DeviceSession]) {
         sessions.forEach { $0.closeStreams() }
-        if sessions.contains(where: { $0.emulator?.isRunning == true }) {
-            Thread.sleep(forTimeInterval: Self.streamsClosing / .seconds(1))
-        }
         sessions.forEach { $0.emulator?.interrupt() }
         sessions.forEach { $0.emulator?.stop(timeout: 90) }
         sessions.forEach { $0.tearDown() }
     }
 
-    /// How long the emulator gets to wind down this app's streams before it is asked to shut down.
-    private static let streamsClosing = Duration.milliseconds(500)
-
-    /// Ends the screen and clipboard streams. An emulator that shuts down while its streaming calls are
-    /// still open sometimes crashes in its gRPC code (`bad_function_call`) before saving its snapshot.
+    /// Ends the screen and clipboard streams, so nothing is drawn or synced while the emulator shuts down.
     private func closeStreams() {
         streamTask?.cancel()
         streamTask = nil

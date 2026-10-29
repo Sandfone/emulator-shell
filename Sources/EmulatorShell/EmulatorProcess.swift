@@ -41,9 +41,13 @@ final class EmulatorProcess: @unchecked Sendable {
     var isRunning: Bool { process?.isRunning ?? false }
 
     /// SIGINT lets the emulator shut down the same way as closing its window (quick-boot snapshot included).
+    /// It goes to the emulator process alone: `Process.interrupt()` would signal the child's whole
+    /// process group, netsimd included (the Bluetooth/Wi-Fi daemon the emulator starts, which other running
+    /// emulators share too): netsimd then quits while qemu is still saving the snapshot, and qemu's attempt to
+    /// reconnect to it crashes in gRPC (`bad_function_call`), losing the snapshot.
     func interrupt() {
         guard let process, process.isRunning else { return }
-        process.interrupt()
+        kill(process.processIdentifier, SIGINT)
     }
 
     func terminate() {
@@ -54,7 +58,7 @@ final class EmulatorProcess: @unchecked Sendable {
     /// Interrupts and waits up to `timeout` for the snapshot to be saved, then kills the process.
     func stop(timeout: TimeInterval = 15) {
         guard let process, process.isRunning else { return }
-        process.interrupt()
+        interrupt()
         let deadline = Date().addingTimeInterval(timeout)
         while process.isRunning && Date() < deadline {
             Thread.sleep(forTimeInterval: 0.1)
