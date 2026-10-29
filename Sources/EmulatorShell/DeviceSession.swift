@@ -86,9 +86,6 @@ final class DeviceSession {
     private var holdingSince: Date?
     /// A fold or unfold playing, with the live view hidden.
     private var foldAnimation: FoldAnimation?
-    /// The last frames seen open and closed, for the side of a fold that is not on screen.
-    private var lastOpenScreen: DeviceThumbnail?
-    private var lastClosedScreen: DeviceThumbnail?
     /// After folding: where the closed device was put, and where the open one was, so that unfolding a device
     /// that has not been moved meanwhile puts it back exactly, without rounding creeping in.
     private var unfoldsTo: (closed: CGPoint, open: CGPoint)?
@@ -97,10 +94,14 @@ final class DeviceSession {
     /// Tells a fold whose pictures are being drawn whether another has come since.
     private var foldID = 0
     private var liveTargetDrawing = false
-    /// Whether the live view has shown a frame of the state its skin shows (not a blank one, as a display the
-    /// emulator has just switched to sends at first); a fold animation that ends before stays until then.
-    private var showsLiveState = true
+    /// Ends a fold animation that finished before the display entered lit up with a live frame.
     private var foldEndWaiting: (() -> Void)?
+    /// While folding: when the posture changed, and when Android turned the display entered on, with what it
+    /// showed then (see `liveFrameSettled`).
+    private var foldStartedAt: Date?
+    private var screenOn: (at: Date, signature: [UInt8])?
+    /// Watches the guest's log for the display entered turning on.
+    private var screenOnWatch: GuestLogWatch?
     /// Pixels per point of the pictures in the animation playing.
     private var pictureScale: CGFloat = 2
     /// Points per skin pixel the user chose. The device is shown smaller only while it does not fit the
@@ -135,11 +136,18 @@ final class DeviceSession {
         openSkin = try DeviceSkin.load(avd: avd)
         skin = openSkin
         do {
-            closedSkin = try avd.closedSkinFolder.map(DeviceSkin.load(folder:))
+            // The outer display's pixels are denser than the inner one's, so its skin draws the same device
+            // taller; scaled to the open skin's, the closed device is the open one's right half. Cut down to
+            // the device first, so that it fits the screen wherever the open one does.
+            let openSkin = openSkin
+            closedSkin = try avd.closedSkinFolder.map(DeviceSkin.load(folder:)).map {
+                $0.croppedToBody().scaled(by: openSkin.body.height / $0.body.height)
+            }
         } catch {
             Log.error("\(avd.id): closed skin unusable, staying with the open one: \(error)")
             closedSkin = nil
         }
+        if closedSkin != nil { FoldAnimation.prepare() }
         showWindow(cascade: cascade)
         try startEmulator(coldBoot: coldBoot, extraArguments: extraArguments)
     }
@@ -201,6 +209,8 @@ final class DeviceSession {
         streamTask = nil
         postureTask?.cancel()
         postureTask = nil
+        screenOnWatch?.stop()
+        screenOnWatch = nil
         audioTask?.cancel()
         audioTask = nil
         audio?.stop()
@@ -297,7 +307,7 @@ final class DeviceSession {
 
     /// "API 37.1 · 1280 × 2856", from the system image folder name and the display size.
     private func subtitle(skin: DeviceSkin) -> String {
-        let resolution = "\(Int(skin.display.width)) × \(Int(skin.display.height))"
+        let resolution = "\(Int(skin.resolution.width)) × \(Int(skin.resolution.height))"
         guard let folder = avd.sysdir?.split(separator: "/").first(where: { $0.hasPrefix("android-") }) else { return resolution }
         return "API \(folder.dropFirst("android-".count)) · \(resolution)"
     }
@@ -601,6 +611,7 @@ final class DeviceSession {
         tasks.forEach { $0.cancel() }
         streamTask?.cancel()
         postureTask?.cancel()
+        screenOnWatch?.stop()
         audioTask?.cancel()
         audio?.stop()
         input?.finish()
@@ -657,10 +668,6 @@ final class DeviceSession {
                     self.lastSurface = surface
                     self.lastRotation = rotation
                     self.deviceView?.show(frame: surface, rotation: rotation)
-                    if !self.showsLiveState, !Self.isBlank(surface) {
-                        self.showsLiveState = true
-                        self.foldEndWaiting?()
-                    }
                     self.showLiveFold(folded: folded)
                     self.holdTurn(reported: rotation)
                     self.deviceTurned(to: rotation)
@@ -806,6 +813,40 @@ final class DeviceSession {
                 if !Task.isCancelled { Log.error("posture notifications ended: \(error)") }
             }
         }
+        // Android keeps a display it switches to off until the windows on it have drawn, and logs when it
+        // turns it on; the emulator streams what it draws meanwhile, which a real device never shows.
+        screenOnWatch?.stop()
+        let avdId = avd.id
+        screenOnWatch = GuestLogWatch(serial: { RunningEmulator.scan()[avdId]?.serial }, pattern: "Unblocked screen on") { [weak self] _ in
+            DispatchQueue.main.async { MainActor.assumeIsolated { self?.screenTurnedOn() } }
+        }
+    }
+
+    /// While folding, notes that Android has turned the display entered on, and what it showed then.
+    private func screenTurnedOn() {
+        guard folding, screenOn == nil, let surface = lastSurface else { return }
+        Log.debug("display turned on")
+        screenOn = (Date(), Self.signature(of: surface))
+        DispatchQueue.main.asyncAfter(deadline: .now() + Self.settleTime) { [weak self] in
+            guard let self else { return }
+            self.showLiveFold(folded: self.isClosed)
+        }
+    }
+
+    /// How long after Android turns a display on its windows may still be redrawing at the new size.
+    private static let settleTime: TimeInterval = 0.5
+    /// How long after a fold to light up the display entered when the log has not said it turned on.
+    private static let unannouncedTime: TimeInterval = 1.2
+
+    /// Whether a frame of the display entered shows what Android lit it up with, not one of the frames it
+    /// draws while it switches displays: the old layout stretched, then the wallpaper alone while the windows
+    /// redraw. Android turns the display on when they report drawn, which is often a moment before their new
+    /// layout comes through; so the frame must also differ from the one shown then, or come a while after.
+    private func liveFrameSettled(_ surface: IOSurface) -> Bool {
+        guard let started = foldStartedAt else { return true }
+        guard let screenOn else { return Date().timeIntervalSince(started) > Self.unannouncedTime }
+        return Date().timeIntervalSince(screenOn.at) >= Self.settleTime
+            || Self.differs(Self.signature(of: surface), screenOn.signature)
     }
 
     /// Whether the device uses the Mac's microphone, which it hears only through the emulator's own audio.
@@ -845,9 +886,13 @@ final class DeviceSession {
             reshapeWindow(animate: false)
             return
         }
+        // The closed device lies exactly over the open one's right half: their outlines share the top and the
+        // outer edge.
         let geometry = FoldAnimation.Geometry(open: view.size(forQuarterTurns: 0, skin: openSkin, scale: view.scale),
                                               closed: view.size(forQuarterTurns: 0, skin: closedSkin, scale: view.scale),
-                                              hinge: openSkin.display.midX * view.scale)
+                                              hinge: openSkin.display.midX * view.scale,
+                                              closedOrigin: CGPoint(x: (openSkin.body.maxX - closedSkin.body.maxX) * view.scale,
+                                                                    y: (openSkin.body.minY - closedSkin.body.minY) * view.scale))
         // The state entered is shown as large as it fits, which may differ from the state left; the animation
         // grows or shrinks to it while it folds.
         let growth = shownScale(turns: deviceTurns, on: window.screen) / view.scale
@@ -880,31 +925,33 @@ final class DeviceSession {
         // once they are ready. Meanwhile the live view keeps its last frame rather than the next state's.
         view.freezesFrames = true
         folding = true
+        foldStartedAt = Date()
+        screenOn = nil
+        DispatchQueue.main.asyncAfter(deadline: .now() + Self.unannouncedTime) { [weak self] in
+            guard let self else { return }
+            self.showLiveFold(folded: self.isClosed)
+        }
         foldID += 1
         let id = foldID, turns = deviceTurns, leavingTurns = lastRotation
-        let other = closed ? lastClosedScreen : lastOpenScreen
         let scale = window.backingScaleFactor * max(1, growth)
         pictureScale = scale
         let openSkin = openSkin
         IOSurfaceIncrementUseCount(surface)
         DispatchQueue.global(qos: .userInteractive).async { [weak self] in
+            let drawing = Date()
+            defer { Log.debug("fold pictures drawn in \(Int(Date().timeIntervalSince(drawing) * 1000)) ms") }
             let leaving = Self.image(of: surface)
             IOSurfaceDecrementUseCount(surface)
-            let openScreen = closed ? leaving : other?.screen, openTurns = closed ? leavingTurns : other?.quarterTurns ?? 0
-            let closedScreen = closed ? other?.screen : leaving, closedTurns = closed ? other?.quarterTurns ?? 0 : leavingTurns
-            let openPicture = FoldAnimation.picture(skin: openSkin, screen: openScreen, screenTurns: openTurns, size: geometry.open, scale: scale)
-            let closedPicture = FoldAnimation.picture(skin: closedSkin, screen: closedScreen, screenTurns: closedTurns,
+            // The display entered is dark, as a real one is until it turns on, until its first live frame
+            // lights it up: a frame from the last time it was on would show what the device showed then.
+            let openPicture = FoldAnimation.picture(skin: openSkin, screen: closed ? leaving : nil, screenTurns: leavingTurns,
+                                                    size: geometry.open, scale: scale)
+            let closedPicture = FoldAnimation.picture(skin: closedSkin, screen: closed ? nil : leaving, screenTurns: leavingTurns,
                                                       size: geometry.closed, scale: scale)
             DispatchQueue.main.async {
                 MainActor.assumeIsolated {
                     guard let self, self.foldID == id, let view = self.deviceView, let window = self.window else { return }
-                    // The state being left looked like this; the other side shows it next time.
-                    if let leaving {
-                        let picture = DeviceThumbnail(screen: leaving, quarterTurns: leavingTurns, skinFolder: nil)
-                        if closed { self.lastOpenScreen = picture } else { self.lastClosedScreen = picture }
-                    }
                     view.setSkin(entering)
-                    self.showsLiveState = false
                     view.freezesFrames = false
                     guard let openPicture, let closedPicture else {
                         self.folding = false
@@ -923,17 +970,22 @@ final class DeviceSession {
                             self.foldEndWaiting = nil
                             self.foldAnimation = nil
                             self.folding = false
+                            self.foldStartedAt = nil
+                            self.screenOn = nil
                             self.foldEnded(turns: turns, center: landed)
                             self.unfoldsTo = closed ? self.deviceCenterOnScreen.map { ($0, center) } : nil
                             animation.finish()
                         }
-                        // The live view would show a dark display until the new one's first frame: the animation's
-                        // last picture stays a moment longer instead.
-                        if self.showsLiveState {
+                        // The display entered lights up in the animation's last picture, which stays until it has
+                        // (or a little while, for a device that goes to sleep as it folds), so that the live view
+                        // takes over from a lit display.
+                        if animation.showsLiveTarget {
                             end()
                         } else {
                             self.foldEndWaiting = end
-                            DispatchQueue.main.asyncAfter(deadline: .now() + 1.5) { end() }
+                            DispatchQueue.main.asyncAfter(deadline: .now() + 1.5) {
+                                if !animation.hasLiveTarget { end() }
+                            }
                         }
                     }
                     self.foldAnimation = animation
@@ -958,6 +1010,35 @@ final class DeviceSession {
             }
         }
         return true
+    }
+
+    /// A 32 × 32 grid of a frame's colours, to tell one picture from another.
+    private static func signature(of surface: IOSurface) -> [UInt8] {
+        surface.lock(options: .readOnly, seed: nil)
+        defer { surface.unlock(options: .readOnly, seed: nil) }
+        let base = surface.baseAddress.assumingMemoryBound(to: UInt8.self)
+        let width = surface.width, height = surface.height, row = surface.bytesPerRow
+        var samples: [UInt8] = []
+        samples.reserveCapacity(32 * 32 * 3)
+        for j in 0..<32 {
+            for i in 0..<32 {
+                let pixel = base + (height * (2 * j + 1) / 64) * row + (width * (2 * i + 1) / 64) * 4
+                samples += [pixel[0], pixel[1], pixel[2]]
+            }
+        }
+        return samples
+    }
+
+    /// Whether two signatures show different pictures: a few percent of the grid changed, as the icons
+    /// coming onto a bare wallpaper do, not just the clock.
+    private static func differs(_ a: [UInt8], _ b: [UInt8]) -> Bool {
+        guard a.count == b.count else { return true }
+        var changed = 0
+        for k in stride(from: 0, to: a.count, by: 3)
+        where (0..<3).contains(where: { abs(Int(a[k + $0]) - Int(b[k + $0])) > 24 }) {
+            changed += 1
+        }
+        return changed > a.count / 3 / 50
     }
 
     /// A frame as an image, for the fold animation's pictures; on any thread.
@@ -991,11 +1072,12 @@ final class DeviceSession {
         return CGPoint(x: center.x + fitted.minX - frame.minX, y: center.y + fitted.minY - frame.minY)
     }
 
-    /// While folding, the first live frame of the state being entered replaces its picture in the animation;
-    /// drawn elsewhere, like the pictures, so the window's resizing is not held up.
+    /// While folding, and after until the animation ends, the first settled live frame of the state being
+    /// entered lights up its dark display in the animation; drawn elsewhere, like the pictures, so the
+    /// window's resizing is not held up.
     private func showLiveFold(folded: Bool) {
-        guard let animation = foldAnimation, !animation.showsLiveTarget, !liveTargetDrawing, animation.closing == folded,
-              let surface = lastSurface, !Self.isBlank(surface), let view = deviceView else { return }
+        guard let animation = foldAnimation, !animation.hasLiveTarget, !liveTargetDrawing, animation.closing == folded,
+              let surface = lastSurface, !Self.isBlank(surface), liveFrameSettled(surface), let view = deviceView else { return }
         liveTargetDrawing = true
         let skin = folded ? closedSkin ?? openSkin : openSkin
         let size = view.size(forQuarterTurns: 0, skin: skin, scale: view.scale)
@@ -1004,12 +1086,12 @@ final class DeviceSession {
         DispatchQueue.global(qos: .userInteractive).async { [weak self] in
             let screen = Self.image(of: surface)
             IOSurfaceDecrementUseCount(surface)
-            let picture = screen.flatMap { FoldAnimation.picture(skin: skin, screen: $0, screenTurns: turns, size: size, scale: scale) }
+            let picture = screen.flatMap { FoldAnimation.picture(skin: skin, screen: $0, screenTurns: turns, size: size, scale: scale)?.screen }
             DispatchQueue.main.async {
                 MainActor.assumeIsolated {
                     self?.liveTargetDrawing = false
                     guard let picture, let current = self?.foldAnimation, current === animation else { return }
-                    animation.showLiveTarget(picture)
+                    animation.showLiveTarget(picture) { self?.foldEndWaiting?() }
                 }
             }
         }

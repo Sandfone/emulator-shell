@@ -170,8 +170,12 @@ overlay, so they stay transparent instead of showing through.
 
 The window follows the posture through `streamNotification`, whether it was set from the "More" panel,
 the emulator console (`adb emu fold`, `posture`) or a snapshot. Closed, it shows the skin's `closed`
-artwork with the outer display; open or half-open, the `default` one, at the same scale, so the two
-keep their real proportions.
+artwork with the outer display; open or half-open, the `default` one. The two are drawn at different
+pixel densities, like the displays (a Pixel 10 Pro Fold's closed artwork is 2495 pixels tall, its open
+one 2266), so the closed one is scaled to the open one's: the closed device is then exactly the open
+one's right half, as on a real device. It is cut down to the device's outline first: its layout leaves
+59 pixels below it, which would make it taller than the open skin and shown smaller to fit the
+screen.
 
 The emulator holds a book-style foldable on its side while open (a cold boot reports rotation 3),
 unlike the closed device. A real one stays in the hand as it is when it folds, so here a foldable is
@@ -183,8 +187,18 @@ Folding and unfolding are animated, however the posture changed, except for the 
 boots in. The animation plays in a transparent window over the device's (the folding half reaches past
 its edges) from pictures of both states, while the live view is hidden: like a book closing, the half
 left of the hinge, whose back is the outer display on Pixel Fold models, swings toward the viewer
-over onto the right one with some perspective, darkening as it turns away, and past 90° shows the
-outer display, which lands on the right half. If the state entered is
+over onto the right one with some perspective, and past 90° shows the
+outer display, which lands exactly over the right half, their outlines sharing the top and the outer
+edge. The right half stays put throughout, as if lying on a table. As in Xcode's iPhone Duo, a turning display
+frosts over: as it tilts away from the viewer a blurred copy of its picture fades in over it, fully by
+60°, under a frame that stays sharp; nothing darkens it. Each half is drawn as its
+frame and its display apart for that; the blur is drawn at a quarter of the size (it loses nothing
+there) and set up when a foldable opens, so that the first fold does not wait for it. The animation
+starts a fifteenth of a second after its pictures are handed over, so that the render server has
+taken them in and the start is not skipped. It moves like a real hinge over 0.6 s: stiff at
+first, then the magnets pull the halves shut for the last tenth, where they bounce once; opening,
+the magnets hold for a moment, then the hinge swings open and slows to a stop flat. The motion is
+sampled into keyframes rather than eased, so it can have that shape. If the state entered is
 shown at another size (it does not fit the screen at the chosen one) or its window would not fit
 where it lands, it grows or moves there meanwhile. The window, and with it the title bar and the
 button pill, resizes over the same time with the same easing, ending with the fold: stepped on each
@@ -197,10 +211,27 @@ fold (driven by the render server).
 
 Frames of the other state, which keep coming for a moment after the posture changes, are never shown
 in a skin, and the first frames of a display the emulator has just switched to are blank; so the
-live view goes dark at the switch, a blank frame never replaces a picture, and an animation that ends
-before the new display's first real frame keeps its last picture until it comes (1.5 s at most). The outer display's first live frame replaces its picture
-as soon as it arrives; the side not on screen otherwise shows its last frame, or a dark display. A
-device unfolded where it was folded goes back exactly where it was.
+live view goes dark at the switch and a blank frame never replaces a picture. The display entered is
+dark in the animation, as a real one is until it turns on (a frame kept from the last time that
+display was on would show whatever the device showed then, and jump to what it shows now), and lights
+up once Android has turned it on, fading in over 0.2 s. An animation that ends before then keeps
+its last picture until the display has lit up, or for 1.5 s if nothing comes (a device that goes to
+sleep as it folds), so the live view takes over from a lit display. A device unfolded where it was
+folded goes back exactly where it was.
+
+While it switches displays Android draws the old layout stretched, then the wallpaper alone while the
+windows redraw at the new size, then the new layout. A real device keeps the display off meanwhile
+("Blocking screen on until initial contents have been drawn"); the emulator streams those frames
+anyway, and reports no backlight change. So the guest's log is followed (`GuestLogWatch`: `adb logcat
+-T 1 -e "Unblocked screen on"`, filtered in the guest; the emulator's `streamLogcat` sends nothing),
+and the display entered lights up with the first frame after Android turned it on that differs from
+the one shown then (2 % of a 32 × 32 grid of samples), or 0.5 s after: Android turns it on when the
+windows report drawn, often a moment before their new layout comes through. Without word from the log
+within 1.2 s of the posture change, the first frame that is not blank does.
+
+Android's own unfold animation (the display lighting up from the hinge, icons moving out from the
+middle) does not play in the emulator, even with the hinge angle swept slowly from 0° to 180°: the
+layouts above are cut from one to the next.
 
 A foldable is streamed at a size that fits either display at the chosen scale, so folding never asks
 for a new stream: asking while the emulator switches displays has crashed it (gfxstream writing a

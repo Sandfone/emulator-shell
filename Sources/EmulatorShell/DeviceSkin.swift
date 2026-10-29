@@ -12,10 +12,39 @@ struct DeviceSkin {
     let screenClip: CGImage
     /// Size of the whole skin in skin pixels.
     let size: CGSize
-    /// Display rectangle in skin pixels, top-left origin. Its size equals the device resolution.
+    /// Display rectangle in skin pixels, top-left origin. Its size equals the device resolution, unless the
+    /// skin has been `scaled(by:)`.
     let display: CGRect
     /// Hardware buttons drawn on the frame's edge, clickable like the real ones.
     let sideButtons: [SideButton]
+    /// The device's outline in skin pixels, top-left origin: where the frame artwork is drawn.
+    let body: CGRect
+    /// The display's size in device pixels.
+    let resolution: CGSize
+
+    /// The skin cut down to the device's outline. Some layouts leave room around it (a Pixel Fold's closed one
+    /// 59 pixels below), which would count when fitting the device on the screen.
+    func croppedToBody() -> DeviceSkin {
+        guard body != CGRect(origin: .zero, size: size), let cropped = frame.cropping(to: body) else { return self }
+        let shift = { (rect: CGRect) in rect.offsetBy(dx: -body.minX, dy: -body.minY) }
+        return DeviceSkin(frame: cropped, screenClip: screenClip, size: body.size, display: shift(display),
+                          sideButtons: sideButtons.map { SideButton(key: $0.key, label: $0.label, rect: shift($0.rect)) },
+                          body: CGRect(origin: .zero, size: body.size), resolution: resolution)
+    }
+
+    /// The skin drawn `factor` times as large in skin pixels; the artwork is resampled when drawn. A foldable's
+    /// closed skin has denser pixels than its open one, and is scaled to match it so that the device is as
+    /// tall either way.
+    func scaled(by factor: CGFloat) -> DeviceSkin {
+        let scale = { (rect: CGRect) in
+            CGRect(x: rect.minX * factor, y: rect.minY * factor, width: rect.width * factor, height: rect.height * factor)
+        }
+        return DeviceSkin(frame: frame, screenClip: screenClip,
+                          size: CGSize(width: size.width * factor, height: size.height * factor),
+                          display: scale(display),
+                          sideButtons: sideButtons.map { SideButton(key: $0.key, label: $0.label, rect: scale($0.rect)) },
+                          body: scale(body), resolution: resolution)
+    }
 
     /// The AVD's skin, or a plain rounded bezel when it has none: many device definitions ship no artwork.
     static func load(avd: Avd) throws -> DeviceSkin {
@@ -86,8 +115,23 @@ struct DeviceSkin {
             screenClip: screenClip,
             size: skinSize,
             display: display,
-            sideButtons: try findSideButtons(frame: frameOnly, display: display)
+            sideButtons: try findSideButtons(frame: frameOnly, display: display),
+            body: try opaqueBounds(of: frameOnly),
+            resolution: display.size
         )
+    }
+
+    /// Where `image` is more than half opaque, top-left origin; all of it if nowhere is.
+    private static func opaqueBounds(of image: CGImage) throws -> CGRect {
+        let pixels = try RGBABuffer(image: image, width: image.width, height: image.height)
+        let opaque = { (x: Int, y: Int) in pixels.alpha(x: x, y: y) > 128 }
+        let rows = (0..<pixels.height).filter { y in (0..<pixels.width).contains { opaque($0, y) } }
+        guard let top = rows.first, let bottom = rows.last else {
+            return CGRect(x: 0, y: 0, width: image.width, height: image.height)
+        }
+        let columns = (0..<pixels.width).filter { x in (top...bottom).contains { opaque(x, $0) } }
+        let left = columns.first ?? 0, right = columns.last ?? pixels.width - 1
+        return CGRect(x: left, y: top, width: right - left + 1, height: bottom - top + 1)
     }
 
     /// Where the background image goes in skin pixels: at the layout's background part, at the image's
@@ -126,7 +170,8 @@ struct DeviceSkin {
             context.fillPath()
         }
         return DeviceSkin(frame: frame, screenClip: screenClip,
-                          size: skinSize, display: display, sideButtons: [])
+                          size: skinSize, display: display, sideButtons: [],
+                          body: CGRect(origin: .zero, size: skinSize), resolution: size)
     }
 
     private static func render(_ size: CGSize, _ draw: (CGContext) -> Void) -> CGImage {
