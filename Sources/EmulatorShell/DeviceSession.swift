@@ -156,8 +156,7 @@ final class DeviceSession {
         closeStreams()
         emulator?.interrupt()
         tasks.append(Task { [weak self] in
-            // Saving a snapshot has taken over 30 s here; only much later is the emulator considered stuck.
-            try? await Task.sleep(for: .seconds(90))
+            try? await Task.sleep(for: .seconds(EmulatorProcess.shutdownTimeout))
             self?.emulator?.terminate()
         })
     }
@@ -173,8 +172,7 @@ final class DeviceSession {
         }
         stopping.forEach { $0.emulator?.interrupt() }
         Task {
-            // Saving a snapshot has taken over 30 s here; only much later is an emulator considered stuck.
-            let deadline = ContinuousClock.now + .seconds(90)
+            let deadline = ContinuousClock.now + .seconds(EmulatorProcess.shutdownTimeout)
             while sessions.contains(where: { $0.emulator?.isRunning == true }), ContinuousClock.now < deadline {
                 try? await Task.sleep(for: .milliseconds(100))
             }
@@ -187,7 +185,7 @@ final class DeviceSession {
     static func stopAll(_ sessions: [DeviceSession]) {
         sessions.forEach { $0.closeStreams() }
         sessions.forEach { $0.emulator?.interrupt() }
-        sessions.forEach { $0.emulator?.stop(timeout: 90) }
+        sessions.forEach { $0.emulator?.stop() }
         sessions.forEach { $0.tearDown() }
     }
 
