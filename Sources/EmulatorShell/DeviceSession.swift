@@ -194,7 +194,8 @@ final class DeviceSession {
         sessions.forEach { $0.tearDown() }
     }
 
-    /// Ends the screen and clipboard streams, so nothing is drawn or synced while the emulator shuts down.
+    /// Ends the screen, posture, sound and clipboard streams, so nothing is drawn, played or synced while the
+    /// emulator shuts down.
     private func closeStreams() {
         streamTask?.cancel()
         streamTask = nil
