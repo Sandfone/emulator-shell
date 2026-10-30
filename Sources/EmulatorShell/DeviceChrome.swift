@@ -4,10 +4,11 @@ import SwiftUI
 
 /// The controls around the device, inside its window: Back / Home / Recents in a pill under the device,
 /// always shown, and a title bar with the remaining buttons that appears while the pointer is near the
-/// device's top. The window keeps room for both, so its size is the size of everything it shows.
+/// device's top; for a foldable also a rail at its right with its postures, always shown. The window keeps
+/// room for them all, so its size is the size of everything it shows.
 @MainActor
 final class DeviceChrome: NSObject, NSPopoverDelegate {
-    enum Action { case close, minimize, screenshot, rotateLeft, rotateRight, toggleFold }
+    enum Action { case close, minimize, screenshot, rotateLeft, rotateRight, toggleFold, posture(PostureValue) }
 
     /// A device key went down (`true`) or up; the key is a W3C key name.
     var onKey: ((_ key: String, _ pressed: Bool) -> Void)?
@@ -26,6 +27,9 @@ final class DeviceChrome: NSObject, NSPopoverDelegate {
     private let deviceName: String
     private let titleBar = GlassView(cornerRadius: 14)
     private let pill = GlassView(cornerRadius: 22)
+    /// A foldable's postures, open, closed and half open, the one it is in marked.
+    private let rail = GlassView(cornerRadius: 22)
+    private var postureButtons: [(PostureValue, ToolbarButton)] = []
     private let hud = GlassView(cornerRadius: 14)
     private let hudLabel = NSTextField(labelWithString: "")
     private var titleButtons: [ToolbarButton] = []
@@ -48,14 +52,14 @@ final class DeviceChrome: NSObject, NSPopoverDelegate {
     private var titleHeld = false
     /// While the window is being resized the title bar stays away and the size readout takes its place.
     private var resizing = false
-    /// The box the bars are placed around, in the container's coordinates.
+    /// The box the bars are placed in, and the device in it, in the container's coordinates.
     private var box = CGRect.zero
+    private var device = CGRect.zero
     private let foldable: Bool
-    private var foldButton: ToolbarButton?
     /// The title bar's buttons that may be left out on a narrow device, in the order they go.
     private var droppableButtons: [[ToolbarButton]] = []
 
-    /// `foldable` adds a button that folds and unfolds the device.
+    /// `foldable` adds the posture rail.
     init(container: NSView, deviceName: String, subtitle: String, foldable: Bool = false) {
         self.container = container
         self.deviceName = deviceName
@@ -64,10 +68,12 @@ final class DeviceChrome: NSObject, NSPopoverDelegate {
         buildTitleBar(subtitle: subtitle)
         buildPill()
         buildHud()
+        if foldable { buildRail() }
         titleBar.alphaValue = 0
         titleBar.isHidden = true
         hud.isHidden = true
         [pill, titleBar, hud].forEach(container.addSubview)
+        if foldable { container.addSubview(rail) }
         setReady(false)
 
         let moved: NSEvent.EventTypeMask = [.mouseMoved, .leftMouseDragged]
@@ -93,14 +99,18 @@ final class DeviceChrome: NSObject, NSPopoverDelegate {
         popover?.close()
     }
 
-    /// Places the bars in `box` around `device` (both in the container's coordinates).
+    /// Places the bars in `box` around `device` (both in the container's coordinates): the title bar and the
+    /// pill as wide as the device, the rail beside it.
     func layout(device: CGRect, box: CGRect) {
         self.box = box
-        fitTitleBar(width: box.width)
+        self.device = device
+        fitTitleBar(width: device.width)
         titleBar.frame = titleFrame(visible: titleVisible)
-        pill.frame = CGRect(x: (box.midX - Self.pillWidth / 2).rounded(), y: box.minY, width: Self.pillWidth, height: Self.barHeight)
-        let hudWidth = min(max(150, ceil(hudLabel.intrinsicContentSize.width) + 28), box.width)
-        hud.frame = CGRect(x: (box.midX - hudWidth / 2).rounded(), y: box.maxY - Self.barHeight, width: hudWidth, height: 32)
+        pill.frame = CGRect(x: (device.midX - Self.pillWidth / 2).rounded(), y: box.minY, width: Self.pillWidth, height: Self.barHeight)
+        let hudWidth = min(max(150, ceil(hudLabel.intrinsicContentSize.width) + 28), device.width)
+        hud.frame = CGRect(x: (device.midX - hudWidth / 2).rounded(), y: box.maxY - Self.barHeight, width: hudWidth, height: 32)
+        let railHeight = Self.railHeight(buttons: postureButtons.count)
+        rail.frame = CGRect(x: device.maxX + Self.gap, y: (device.midY - railHeight / 2).rounded(), width: Self.barHeight, height: railHeight)
         if let toast {
             let width = toast.frame.width
             toast.frame = CGRect(x: (device.midX - width / 2).rounded(), y: device.maxY - 96, width: width, height: 36)
@@ -109,7 +119,7 @@ final class DeviceChrome: NSObject, NSPopoverDelegate {
 
     /// Until the guest has booted the buttons are disabled and the pill says so.
     func setReady(_ ready: Bool) {
-        (titleButtons + navButtons).forEach { $0.isEnabled = ready }
+        (titleButtons + navButtons + postureButtons.map(\.1)).forEach { $0.isEnabled = ready }
         navStack.isHidden = !ready
         bootLabel.isHidden = ready
     }
@@ -218,10 +228,8 @@ final class DeviceChrome: NSObject, NSPopoverDelegate {
         let volume = [keyButton("speaker.wave.1", "音量 −", "⌥⌘↓", "AudioVolumeDown", size: 32),
                       keyButton("speaker.wave.3", "音量 +", "⌥⌘↑", "AudioVolumeUp", size: 32)]
         let power = keyButton("power", "电源", "⌘L", "Power", size: 32)
-        let fold = foldable ? actionButton(Self.foldSymbol, "折叠", "⇧⌘F", .toggleFold) : nil
-        foldButton = fold
-        titleButtons = [screenshot] + rotate + (fold.map { [$0] } ?? []) + volume + [power]
-        droppableButtons = [volume, [power], rotate, fold.map { [$0] } ?? [], [screenshot]]
+        titleButtons = [screenshot] + rotate + volume + [power]
+        droppableButtons = [volume, [power], rotate, [screenshot]]
         let more = ToolbarButton(symbol: "ellipsis", label: "更多功能", shortcut: nil, size: 32)
         more.onPress = { [weak self] pressed in if pressed { self?.toggleMore() } }
         moreButton = more
@@ -265,6 +273,33 @@ final class DeviceChrome: NSObject, NSPopoverDelegate {
         ])
     }
 
+    private func buildRail() {
+        let postures: [(PostureValue, String, String)] = [
+            (.postureOpened, "rectangle.split.2x1", "展开"),
+            (.postureClosed, "rectangle.portrait", "合上"),
+            (.postureHalfOpened, "book", "半开"),
+        ]
+        postureButtons = postures.map { posture, symbol, label in
+            let button = ToolbarButton(symbol: symbol, label: label, shortcut: nil, size: 36)
+            button.onPress = { [weak self] pressed in if !pressed { self?.onAction?(.posture(posture)) } }
+            return (posture, button)
+        }
+        let stack = NSStackView(views: postureButtons.map(\.1))
+        stack.orientation = .vertical
+        stack.spacing = 2
+        rail.content.addSubview(stack)
+        stack.translatesAutoresizingMaskIntoConstraints = false
+        NSLayoutConstraint.activate([
+            stack.centerXAnchor.constraint(equalTo: rail.content.centerXAnchor),
+            stack.centerYAnchor.constraint(equalTo: rail.content.centerYAnchor),
+        ])
+    }
+
+    /// The rail's height for `buttons` of the pill's size, with the pill's inset at the ends.
+    private static func railHeight(buttons: Int) -> CGFloat {
+        CGFloat(buttons) * 36 + CGFloat(max(buttons - 1, 0)) * 2 + 2 * 4
+    }
+
     private func buildHud() {
         hudLabel.font = .monospacedDigitSystemFont(ofSize: 12, weight: .medium)
         hudLabel.alignment = .center
@@ -278,7 +313,7 @@ final class DeviceChrome: NSObject, NSPopoverDelegate {
 
     /// The bar is as wide as the device, so on a small one what does not fit is left out: first the name,
     /// then the volume keys and power (also on the frame's side buttons and in the Device menu), then the
-    /// rotate buttons, then fold, then screenshot. The window buttons and "More" always stay. The labels'
+    /// rotate buttons, then screenshot. The window buttons and "More" always stay. The labels'
     /// stack stays as the flexible space that keeps the buttons at the trailing edge.
     private func fitTitleBar(width: CGFloat) {
         var hidden: [ToolbarButton] = []
@@ -293,13 +328,10 @@ final class DeviceChrome: NSObject, NSPopoverDelegate {
         for button in titleButtons { button.isHidden = hidden.contains { $0 === button } }
     }
 
-    /// The fold button offers what the device's posture allows: folding while open, unfolding while closed.
-    func setFolded(_ folded: Bool) {
-        foldButton?.update(symbol: folded ? Self.unfoldSymbol : Self.foldSymbol, label: folded ? "展开" : "折叠", shortcut: "⇧⌘F")
+    /// Marks the rail's button for the posture the device is in (none for postures it does not offer).
+    func showPosture(_ posture: PostureValue) {
+        for (value, button) in postureButtons { button.isOn = value == posture }
     }
-
-    private static let foldSymbol = "arrow.right.and.line.vertical.and.arrow.left"
-    private static let unfoldSymbol = "arrow.left.and.line.vertical.and.arrow.right"
 
     private func pin(_ view: NSView, to container: NSView) {
         view.translatesAutoresizingMaskIntoConstraints = false
@@ -324,7 +356,7 @@ final class DeviceChrome: NSObject, NSPopoverDelegate {
     }
 
     private func titleFrame(visible: Bool) -> CGRect {
-        CGRect(x: box.minX, y: box.maxY - Self.barHeight + (visible ? 0 : Self.revealOffset), width: box.width, height: Self.barHeight)
+        CGRect(x: device.minX, y: box.maxY - Self.barHeight + (visible ? 0 : Self.revealOffset), width: device.width, height: Self.barHeight)
     }
 
     // MARK: - Hover
@@ -334,7 +366,7 @@ final class DeviceChrome: NSObject, NSPopoverDelegate {
         guard let container, let window = container.window, NSApp.isActive, !resizing else { return false }
         if popover?.isShown == true { return true }
         // The title bar's room plus the top of the device, in screen coordinates.
-        let frame = window.convertToScreen(container.convert(box, to: nil))
+        let frame = window.convertToScreen(container.convert(CGRect(x: device.minX, y: box.minY, width: device.width, height: box.height), to: nil))
         let band = CGRect(x: frame.minX, y: frame.maxY - Self.barHeight - Self.gap - Self.bandDepth,
                           width: frame.width, height: Self.barHeight + Self.gap + Self.bandDepth)
         return band.contains(NSEvent.mouseLocation)

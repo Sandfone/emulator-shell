@@ -37,6 +37,23 @@ final class DeviceView: NSView {
     private let flashLayer = CALayer()
     private let frameLayer = CALayer()
     private let highlightLayer = CALayer()
+    /// Holds the display and frame; masked to the right of the hinge while a foldable is half open, when
+    /// `flapLayer` shows the half left of it, turned toward the viewer about the hinge.
+    private let bodyLayer = CALayer()
+    private let bodyMask = CALayer()
+    /// Gives the turned half its depth, about as the fold animation's (`FoldAnimation`).
+    private let flapSpace = CALayer()
+    private let flapLayer = CALayer()
+    private let flapMask = CALayer()
+    /// The flap's own display (content and clip) and frame, showing what the body's do.
+    private let flapScreen = CALayer()
+    private let flapClip = CALayer()
+    private let flapContent = CALayer()
+    private let flapFrame = CALayer()
+    /// How far the half left of the hinge is turned toward the viewer, and where the hinge is, in skin pixels
+    /// from the left.
+    private(set) var foldAngle: CGFloat = 0
+    private var hinge: CGFloat = 0
     private var isTouching = false
     private var pressedButton: SideButton?
 
@@ -63,17 +80,34 @@ final class DeviceView: NSView {
         highlightLayer.cornerRadius = 3
         highlightLayer.isHidden = true
 
+        flapScreen.backgroundColor = .black
+        flapScreen.mask = flapClip
+        flapContent.contentsGravity = .resize
+        flapContent.magnificationFilter = .linear
+        flapContent.minificationFilter = .trilinear
+        bodyMask.backgroundColor = .black
+        flapMask.backgroundColor = .black
+        flapLayer.mask = flapMask
+        flapSpace.isHidden = true
+
         let still: [String: CAAction] = ["contents": NSNull(), "bounds": NSNull(), "position": NSNull(),
-                                         "transform": NSNull(), "hidden": NSNull()]
-        for sublayer in [deviceLayer, screenLayer, screenClipLayer, contentLayer, flashLayer,
-                         frameLayer, highlightLayer] {
+                                         "transform": NSNull(), "hidden": NSNull(), "anchorPoint": NSNull(),
+                                         "sublayerTransform": NSNull()]
+        for sublayer in [deviceLayer, screenLayer, screenClipLayer, contentLayer, flashLayer, frameLayer, highlightLayer,
+                         bodyLayer, bodyMask, flapSpace, flapLayer, flapMask, flapScreen, flapClip, flapContent, flapFrame] {
             sublayer.actions = still
         }
         screenLayer.addSublayer(contentLayer)
         screenLayer.addSublayer(flashLayer)
         for sublayer in [screenLayer, frameLayer, highlightLayer] {
-            deviceLayer.addSublayer(sublayer)
+            bodyLayer.addSublayer(sublayer)
         }
+        flapScreen.addSublayer(flapContent)
+        flapLayer.addSublayer(flapScreen)
+        flapLayer.addSublayer(flapFrame)
+        flapSpace.addSublayer(flapLayer)
+        deviceLayer.addSublayer(bodyLayer)
+        deviceLayer.addSublayer(flapSpace)
         deviceLayer.bounds = CGRect(origin: .zero, size: deviceSize)
         layer?.addSublayer(deviceLayer)
     }
@@ -135,6 +169,10 @@ final class DeviceView: NSView {
     /// resized separately.
     func setSkin(_ skin: DeviceSkin) {
         self.skin = skin
+        // Another skin's hinge is not this one's.
+        foldAngle = 0
+        flapLayer.removeAnimation(forKey: "fold")
+        showsFold(false)
         // The last frame is of the other display; dark until the first of this one's.
         contentLayer.contents = nil
         skinCornerInsets = skin.cornerInsets()
@@ -216,6 +254,65 @@ final class DeviceView: NSView {
             layoutContent()
         }
         contentLayer.contents = surface
+        if !flapSpace.isHidden { flapContent.contents = surface }
+    }
+
+    /// How long the half left of the hinge takes to turn between open and half open.
+    static let foldDuration: TimeInterval = 0.45
+
+    /// Turns the half left of `hinge` (in skin pixels from the left) by `angle` toward the viewer, as a
+    /// foldable half open; 0 lays it flat again.
+    func setFold(_ angle: CGFloat, hinge: CGFloat, animated: Bool) {
+        let from = flapSpace.isHidden ? 0 : (flapLayer.presentation()?.value(forKeyPath: "transform.rotation.y") as? CGFloat ?? foldAngle)
+        foldAngle = angle
+        self.hinge = hinge
+        layoutFold()
+        guard animated, from != angle else {
+            if angle == 0 { showsFold(false) }
+            return
+        }
+        CATransaction.begin()
+        // Laid flat, the body shows the whole device again once the half has come down.
+        CATransaction.setCompletionBlock { [weak self] in
+            guard let self, self.foldAngle == 0 else { return }
+            self.showsFold(false)
+        }
+        let turning = CABasicAnimation(keyPath: "transform.rotation.y")
+        turning.fromValue = from
+        turning.toValue = angle
+        turning.duration = Self.foldDuration
+        turning.timingFunction = CAMediaTimingFunction(name: .easeInEaseOut)
+        flapLayer.add(turning, forKey: "fold")
+        CATransaction.commit()
+    }
+
+    /// Splits the device at the hinge, the half left of it turned by `foldAngle`.
+    private func layoutFold() {
+        let size = deviceLayer.bounds.size
+        let x = (hinge * scaleX).rounded()
+        guard foldAngle != 0 || !flapSpace.isHidden, x > 0, x < size.width else { return showsFold(false) }
+        showsFold(true)
+        bodyMask.frame = CGRect(x: x, y: 0, width: size.width - x, height: size.height)
+        flapMask.frame = CGRect(x: 0, y: 0, width: x, height: size.height)
+        // The depth is seen from in front of the right half, as in the fold animation.
+        flapSpace.bounds = CGRect(origin: .zero, size: size)
+        flapSpace.anchorPoint = CGPoint(x: (x + size.width) / 2 / size.width, y: 0.5)
+        flapSpace.position = CGPoint(x: (x + size.width) / 2, y: size.height / 2)
+        var perspective = CATransform3DIdentity
+        perspective.m34 = -1 / (2.2 * max(size.width, size.height))
+        flapSpace.sublayerTransform = perspective
+        flapLayer.bounds = CGRect(origin: .zero, size: size)
+        flapLayer.anchorPoint = CGPoint(x: x / size.width, y: 0.5)
+        flapLayer.position = CGPoint(x: x, y: size.height / 2)
+        // A positive turn about the vertical axis brings the left half toward the viewer.
+        flapLayer.transform = CATransform3DMakeRotation(foldAngle, 0, 1, 0)
+    }
+
+    private func showsFold(_ shown: Bool) {
+        guard shown == flapSpace.isHidden else { return }
+        flapSpace.isHidden = !shown
+        bodyLayer.mask = shown ? bodyMask : nil
+        flapContent.contents = shown ? contentLayer.contents : nil
     }
 
     /// Turns the device to `turns` counterclockwise quarter turns; the window is resized separately.
@@ -272,6 +369,7 @@ final class DeviceView: NSView {
         let backing = window?.backingScaleFactor ?? 2
         let screen = screenRect
 
+        bodyLayer.frame = deviceLayer.bounds
         frameLayer.frame = deviceLayer.bounds
         frameLayer.contentsScale = backing
         frameLayer.contents = Self.resample(skin.frame, to: deviceSize, scale: backing)
@@ -281,7 +379,16 @@ final class DeviceView: NSView {
         screenClipLayer.contentsScale = backing
         screenClipLayer.contents = Self.resample(skin.screenClip, to: screen.size, scale: backing)
         flashLayer.frame = screenLayer.bounds
+
+        flapFrame.frame = frameLayer.frame
+        flapFrame.contentsScale = backing
+        flapFrame.contents = frameLayer.contents
+        flapScreen.frame = screen
+        flapClip.frame = screenClipLayer.frame
+        flapClip.contentsScale = backing
+        flapClip.contents = screenClipLayer.contents
         layoutContent()
+        layoutFold()
         window?.invalidateShadow()
     }
 
@@ -293,6 +400,9 @@ final class DeviceView: NSView {
             : CGRect(x: 0, y: 0, width: size.height, height: size.width)
         contentLayer.position = CGPoint(x: size.width / 2, y: size.height / 2)
         contentLayer.transform = Self.rotation(-contentTurns)
+        flapContent.bounds = contentLayer.bounds
+        flapContent.position = contentLayer.position
+        flapContent.transform = contentLayer.transform
     }
 
     /// Downsamples skin artwork once with high-quality filtering instead of letting the compositor minify ~3×.
@@ -368,11 +478,14 @@ final class DeviceView: NSView {
 
     // MARK: - Input
 
-    /// The event's location in upright device points.
+    /// The event's location in upright device points; on the half left of the hinge while it is turned, where
+    /// on that half it is.
     private func localPoint(for event: NSEvent) -> CGPoint {
         let point = convert(event.locationInWindow, from: nil)
         guard let root = layer else { return point }
-        return deviceLayer.convert(point, from: root)
+        let local = deviceLayer.convert(point, from: root)
+        guard !flapSpace.isHidden, local.x < flapMask.frame.maxX else { return local }
+        return flapLayer.convert(point, from: root)
     }
 
     /// Device pixel under the cursor, clamped to the display so a drag that leaves the screen still ends cleanly.

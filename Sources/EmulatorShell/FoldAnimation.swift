@@ -1,5 +1,4 @@
 import AppKit
-import CoreImage
 
 /// A foldable folding shut or opening, played from still pictures of both states in a transparent window
 /// over the device's own, whose live view is hidden meanwhile. The folding half reaches past the device
@@ -11,9 +10,6 @@ import CoreImage
 /// which stays put as if lying on a table. The hinge is stiff at first, and magnets pull the halves shut
 /// for the last stretch, where they bounce once; opening, they hold for a moment before the hinge gives,
 /// and it slows to a stop flat. The whole is held at the device's turn, which folding keeps.
-///
-/// As in Xcode's iPhone Duo, a turning display frosts over: tilted away from the viewer its picture
-/// blurs, under a frame that stays sharp.
 @MainActor
 final class FoldAnimation {
     /// Sizes in points, upright.
@@ -47,23 +43,20 @@ final class FoldAnimation {
     private static let preparation: CFTimeInterval = 1.0 / 15
     /// How long a display takes to light up with its first live frame.
     static let lightDuration: CFTimeInterval = 0.2
-    /// How blurred a frosted display is, for its width.
-    nonisolated private static let frost: CGFloat = 0.04
 
     let closing: Bool
     /// When the animation began, in `CACurrentMediaTime()`; whatever goes along with it starts there too.
     let start: CFTimeInterval
     private let overlay: NSWindow
-    /// A half's frame and display, drawn apart so that the display can frost over, and the display frosted.
+    /// A half's frame and display, drawn apart so that the display can light up on its own.
     struct Picture {
         let frame: CGImage
         let screen: CGImage
-        let frosted: CGImage
     }
 
-    /// A half on screen: its display, frosted over it, under its frame.
+    /// A half on screen: its display under its frame.
     private struct Face {
-        let layer = CALayer(), screen = CALayer(), frosted = CALayer(), frame = CALayer()
+        let layer = CALayer(), screen = CALayer(), frame = CALayer()
     }
 
     /// The right half, which stays; the left one's front and back, which turn over.
@@ -73,12 +66,13 @@ final class FoldAnimation {
     private(set) var hasLiveTarget = false
     private(set) var showsLiveTarget = false
 
-    /// Folds (`closing`) or unfolds over `window`, with the device held at `turns`. Meanwhile the closed
+    /// Folds (`closing`) or unfolds over `window`, with the device held at `turns`; open, the half left of the
+    /// hinge is turned `openAngle` toward the viewer (half open). Meanwhile the closed
     /// device's centre on screen moves from `closedCenter.from` to `closedCenter.to` and the whole grows by
     /// `growth`, which keeps the window that follows on screen and at its size; both are usually nothing.
     /// `completion` runs once it has finished, with the overlay still showing the last picture; `finish()`
     /// then takes it away.
-    init(closing: Bool, geometry: Geometry, open: Picture, closed: Picture, closedCenter: (from: CGPoint, to: CGPoint),
+    init(closing: Bool, geometry: Geometry, open: Picture, closed: Picture, openAngle: CGFloat, closedCenter: (from: CGPoint, to: CGPoint),
          growth: CGFloat, turns: Int, over window: NSWindow, completion: @escaping () -> Void) {
         self.closing = closing
         // A moment ahead: the render server first takes in the pictures, which would otherwise skip the start.
@@ -142,8 +136,7 @@ final class FoldAnimation {
         CATransaction.setCompletionBlock(completion)
         container.transform = CATransform3DScale(CATransform3DMakeRotation(CGFloat(turns) * .pi / 2, 0, 0, 1), growth, growth, 1)
         // A positive turn about the vertical axis brings the left half toward the viewer.
-        flap.transform = closing ? CATransform3DMakeRotation(.pi, 0, 1, 0) : CATransform3DIdentity
-        for layer in [still.frosted, front.frosted, back.frosted] { layer.opacity = 0 }
+        flap.transform = CATransform3DMakeRotation(closing ? .pi : openAngle, 0, 1, 0)
         let ease = CAMediaTimingFunction(name: .easeInEaseOut)
         if growth != 1 {
             let growing = CABasicAnimation(keyPath: "transform.scale")
@@ -160,19 +153,11 @@ final class FoldAnimation {
         // The motion is sampled finely enough to play back as straight steps between the samples.
         let steps = 60
         let progress = (0...steps).map { Double($0) / Double(steps) }
-        let folded = progress.map { CGFloat(Self.folded(at: $0, closing: closing)) * .pi }
-        // Each turning display frosts over as it tilts.
-        let motions: [(CALayer, String, [CGFloat])] = [
-            (flap, "transform.rotation.y", folded),
-            (front.frosted, "opacity", folded.map { Self.frosting(facing: $0) }),
-            (back.frosted, "opacity", folded.map { Self.frosting(facing: $0 - .pi) }),
-        ]
-        for (layer, keyPath, values) in motions {
-            let motion = CAKeyframeAnimation(keyPath: keyPath)
-            motion.values = values
-            motion.keyTimes = progress.map { NSNumber(value: $0) }
-            Self.schedule(motion, at: start, duration: Self.foldDuration, ease: CAMediaTimingFunction(name: .linear), on: layer)
-        }
+        let folded = progress.map { openAngle + CGFloat(Self.folded(at: $0, closing: closing)) * (.pi - openAngle) }
+        let motion = CAKeyframeAnimation(keyPath: "transform.rotation.y")
+        motion.values = folded
+        motion.keyTimes = progress.map { NSNumber(value: $0) }
+        Self.schedule(motion, at: start, duration: Self.foldDuration, ease: CAMediaTimingFunction(name: .linear), on: flap)
         CATransaction.commit()
 
         // Not a child window: those move with their parent, which resizes and may move meanwhile.
@@ -230,13 +215,6 @@ final class FoldAnimation {
         return 1 - 0.025 * sin(.pi * (p - shut) / (1 - shut))
     }
 
-    /// How far a display turned `angle` from the viewer has frosted over: from a little way off facing, fully
-    /// by 60°.
-    private static func frosting(facing angle: CGFloat) -> CGFloat {
-        let tilt = min(1, max(0, (1 - cos(angle)) / 0.5))
-        return tilt * tilt * (3 - 2 * tilt)
-    }
-
     private static func schedule(_ animation: CAPropertyAnimation, at start: CFTimeInterval, duration: CFTimeInterval,
                                  ease: CAMediaTimingFunction, on layer: CALayer) {
         animation.beginTime = start
@@ -247,17 +225,16 @@ final class FoldAnimation {
         layer.add(animation, forKey: animation.keyPath)
     }
 
-    /// Lays out a half: `part` of `picture` in `frame`, the frosted display over the sharp one.
+    /// Lays out a half: `part` of `picture` in `frame`.
     private static func setUp(_ face: Face, picture: Picture, frame: CGRect, part: CGRect, scale: CGFloat) {
         face.layer.frame = frame
-        for (layer, image, parent) in [(face.screen, picture.screen, face.layer), (face.frosted, picture.frosted, face.screen),
-                                       (face.frame, picture.frame, face.layer)] {
-            layer.frame = parent.bounds
+        for (layer, image) in [(face.screen, picture.screen), (face.frame, picture.frame)] {
+            layer.frame = face.layer.bounds
             layer.contents = image
             layer.contentsScale = scale
             layer.contentsRect = part
             layer.contentsGravity = .resize
-            parent.addSublayer(layer)
+            face.layer.addSublayer(layer)
         }
     }
 
@@ -290,36 +267,7 @@ final class FoldAnimation {
         context.restoreGState()
         frameContext.interpolationQuality = .high
         frameContext.draw(skin.frame, in: CGRect(x: 0, y: 0, width: width, height: height))
-        guard let screenImage = context.makeImage(), let frameImage = frameContext.makeImage(),
-              let frostedImage = frosted(screenImage, radius: CGFloat(width) * frost) else { return nil }
-        return Picture(frame: frameImage, screen: screenImage, frosted: frostedImage)
-    }
-
-    /// `screen` blurred, keeping its outline: blurred with its edges carried on outward, so that they do not
-    /// fade, then cut back to the outline. Blurred, it loses nothing drawn at a quarter of the size, which
-    /// is much quicker; the layer showing it scales it back up.
-    nonisolated private static func frosted(_ screen: CGImage, radius: CGFloat) -> CGImage? {
-        let reduction: CGFloat = 4
-        let image = CIImage(cgImage: screen).transformed(by: CGAffineTransform(scaleX: 1 / reduction, y: 1 / reduction))
-        let blurred = image.clampedToExtent().applyingGaussianBlur(sigma: Double(radius / reduction)).cropped(to: image.extent)
-        let outline = CIFilter(name: "CIBlendWithAlphaMask", parameters: [
-            kCIInputImageKey: blurred, kCIInputBackgroundImageKey: CIImage.empty(), kCIInputMaskImageKey: image,
-        ])?.outputImage
-        return outline.flatMap { frostContext.createCGImage($0, from: image.extent) }
-    }
-
-    nonisolated private static let frostContext = CIContext(options: [.cacheIntermediates: false])
-
-    /// Gets the blur ready ahead of the first fold, which would otherwise wait a few hundred milliseconds for
-    /// it to set up.
-    nonisolated static func prepare() {
-        DispatchQueue.global(qos: .utility).async {
-            let size = 64
-            guard let context = CGContext(data: nil, width: size, height: size, bitsPerComponent: 8, bytesPerRow: 0,
-                                          space: CGColorSpace(name: CGColorSpace.sRGB)!,
-                                          bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue),
-                  let image = context.makeImage() else { return }
-            _ = frosted(image, radius: CGFloat(size) * frost)
-        }
+        guard let screenImage = context.makeImage(), let frameImage = frameContext.makeImage() else { return nil }
+        return Picture(frame: frameImage, screen: screenImage)
     }
 }

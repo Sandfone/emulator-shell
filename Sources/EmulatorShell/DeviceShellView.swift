@@ -1,15 +1,18 @@
 import AppKit
 
 /// The device window's content: the device, with room above it for the title bar and below it for the
-/// button pill. That box is everything the window shows, so its size is the window's size as the user
-/// sees it; the room stays reserved while the title bar is hidden so the device does not jump when it
-/// appears. Around the box is the window's thin margin (`DeviceWindow.margin`), empty except where the
-/// corner resize areas reach into it.
+/// button pill, and for a foldable on either side for the posture rail (on the right; the left is the same
+/// width, so the device stays centred). That box is everything the window shows, so its size is the
+/// window's size as the user sees it; the room stays reserved while the title bar is hidden so the device
+/// does not jump when it appears. Around the box is the window's thin margin (`DeviceWindow.margin`), empty
+/// except where the corner resize areas reach into it.
 @MainActor
 final class DeviceShellView: NSView {
     /// Space above the device (title bar and gap) and below it (gap and pill).
     static let topRoom = DeviceChrome.barHeight + DeviceChrome.gap
     static let bottomRoom = DeviceChrome.gap + DeviceChrome.barHeight
+    /// Space on either side of a foldable for the posture rail and its gap.
+    static let sideRoom = DeviceChrome.gap + DeviceChrome.barHeight
 
     let deviceView: DeviceView
     /// Set once the chrome has added its views, so the handles can go above them.
@@ -25,9 +28,10 @@ final class DeviceShellView: NSView {
     private var showsResizeCursor = false
     private var monitors: [Any] = []
 
-    init(deviceView: DeviceView) {
+    /// `sideRoom` is `Self.sideRoom` for a foldable, else 0.
+    init(deviceView: DeviceView, sideRoom: CGFloat) {
         self.deviceView = deviceView
-        super.init(frame: CGRect(origin: .zero, size: Self.boxSize(device: deviceView.size(forQuarterTurns: 0))))
+        super.init(frame: CGRect(origin: .zero, size: Self.boxSize(device: deviceView.size(forQuarterTurns: 0), sideRoom: sideRoom)))
         wantsLayer = true
         addSubview(deviceView)
         for corner in ResizeHandle.Corner.allCases {
@@ -67,10 +71,10 @@ final class DeviceShellView: NSView {
     @available(*, unavailable)
     required init?(coder: NSCoder) { fatalError() }
 
-    /// The box's size around a device of `device` points: as wide as the device, whose bars fit what room
-    /// there is.
-    static func boxSize(device: CGSize) -> CGSize {
-        CGSize(width: device.width, height: device.height + topRoom + bottomRoom)
+    /// The box's size around a device of `device` points: as wide as the device and `sideRoom` either side,
+    /// its bars fitting what room there is.
+    static func boxSize(device: CGSize, sideRoom: CGFloat) -> CGSize {
+        CGSize(width: device.width + 2 * sideRoom, height: device.height + topRoom + bottomRoom)
     }
 
     /// The box in this view: everything but the window's margin.

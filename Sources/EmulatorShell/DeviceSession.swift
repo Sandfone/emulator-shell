@@ -79,6 +79,11 @@ final class DeviceSession {
     private let closedSkin: DeviceSkin?
     /// Whether a foldable with `closedSkin` is closed, which shows that skin.
     private var isClosed = false
+    /// Whether an open foldable is half open, which turns the half left of its hinge toward the viewer by
+    /// `halfOpenAngle`, about as Xcode's iPhone Duo shows its "Partially Open".
+    private var halfOpen = false
+    private static let halfOpenAngle: CGFloat = .pi / 6
+    private var openAngle: CGFloat { halfOpen ? Self.halfOpenAngle : 0 }
     /// For a foldable, until its first frame: the turn it is held at, which the emulator's own (on its side
     /// while open) may differ from. Then, until frames report that turn or `holdingSince` is a few seconds
     /// old, other turns they report are not followed.
@@ -147,7 +152,6 @@ final class DeviceSession {
             Log.error("\(avd.id): closed skin unusable, staying with the open one: \(error)")
             closedSkin = nil
         }
-        if closedSkin != nil { FoldAnimation.prepare() }
         showWindow(cascade: cascade)
         try startEmulator(coldBoot: coldBoot, extraArguments: extraArguments)
     }
@@ -251,8 +255,8 @@ final class DeviceSession {
         view.setQuarterTurns(turns, animated: false)
         if closedSkin != nil { heldTurns = turns }
         deviceTurns = turns
-        let shell = DeviceShellView(deviceView: view)
-        let size = DeviceShellView.boxSize(device: view.size(forQuarterTurns: turns))
+        let shell = DeviceShellView(deviceView: view, sideRoom: sideRoom)
+        let size = DeviceShellView.boxSize(device: view.size(forQuarterTurns: turns), sideRoom: sideRoom)
         let window = DeviceWindow(contentRect: CGRect(origin: .zero, size: size), styleMask: [.borderless, .miniaturizable], backing: .buffered, defer: false)
         shell.setFrameSize(window.frame.size)
         window.isOpaque = false
@@ -353,7 +357,7 @@ final class DeviceSession {
         }
         let scale = min(max(target, minScale), fitScale(turns: deviceTurns, in: screen?.visibleFrame.size ?? window.box.size))
         preferredScale = scale
-        let box = DeviceShellView.boxSize(device: view.size(forQuarterTurns: deviceTurns, scale: scale))
+        let box = DeviceShellView.boxSize(device: view.size(forQuarterTurns: deviceTurns, scale: scale), sideRoom: sideRoom)
         let old = window.box
         let frame = CGRect(x: (old.midX - box.width / 2).rounded(), y: (old.maxY - box.height).rounded(), width: box.width, height: box.height)
         view.setLiveScale(scale)
@@ -403,7 +407,7 @@ final class DeviceSession {
             let largest = fitScale(turns: deviceTurns, in: room)
             scale = snapped(min(max(scale, minScale), max(largest, minScale)), largest: largest, on: screen)
             view.setLiveScale(scale)
-            let box = DeviceShellView.boxSize(device: view.size(forQuarterTurns: deviceTurns, scale: scale))
+            let box = DeviceShellView.boxSize(device: view.size(forQuarterTurns: deviceTurns, scale: scale), sideRoom: sideRoom)
             let frame = CGRect(x: corner.isLeft ? anchor.x - box.width : anchor.x, y: corner.isTop ? anchor.y : anchor.y - box.height,
                                width: box.width, height: box.height)
             if frame != window.box { window.setBox(frame, display: true) }
@@ -424,7 +428,7 @@ final class DeviceSession {
         let scale = shownScale(turns: deviceTurns, on: screen)
         if abs(scale - view.scale) > 0.0001 {
             view.setLiveScale(scale)
-            let box = DeviceShellView.boxSize(device: view.size(forQuarterTurns: deviceTurns, scale: scale))
+            let box = DeviceShellView.boxSize(device: view.size(forQuarterTurns: deviceTurns, scale: scale), sideRoom: sideRoom)
             let old = window.box
             let frame = CGRect(x: old.minX, y: old.maxY - box.height, width: box.width, height: box.height)
             window.setBox(DeviceWindow.fitted(frame, on: screen), display: true)
@@ -491,7 +495,12 @@ final class DeviceSession {
     private func fitScale(turns: Int, in area: CGSize) -> CGFloat {
         let size = turns % 2 == 0 ? skin.size : CGSize(width: skin.size.height, height: skin.size.width)
         let rooms = DeviceShellView.topRoom + DeviceShellView.bottomRoom
-        return min((area.height - rooms) / size.height, area.width / size.width)
+        return min((area.height - rooms) / size.height, (area.width - 2 * sideRoom) / size.width)
+    }
+
+    /// Room either side of the device: a foldable's posture rail.
+    private var sideRoom: CGFloat {
+        closedSkin != nil ? DeviceShellView.sideRoom : 0
     }
 
     /// The device's long side is never shorter than 360 points.
@@ -694,6 +703,7 @@ final class DeviceSession {
         case .rotateLeft: rotate(by: 1)
         case .rotateRight: rotate(by: -1)
         case .toggleFold: toggleFold()
+        case let .posture(posture): enqueue { _ = try? await $0.setPosture(posture) }
         }
     }
 
@@ -755,7 +765,7 @@ final class DeviceSession {
             view.setLiveScale(scale)
             view.commitScale()
         }
-        let box = DeviceShellView.boxSize(device: view.size(forQuarterTurns: deviceTurns))
+        let box = DeviceShellView.boxSize(device: view.size(forQuarterTurns: deviceTurns), sideRoom: sideRoom)
         let old = window.box
         let frame = CGRect(x: (old.midX - box.width / 2).rounded(), y: (old.midY - box.height / 2).rounded(),
                            width: box.width, height: box.height)
@@ -873,16 +883,24 @@ final class DeviceSession {
     private func postureChanged(to posture: PostureValue) {
         Log.debug("posture \(posture)")
         chrome?.controls?.posture = posture
+        chrome?.showPosture(posture)
         guard let closedSkin, let view = deviceView else { return }
         let closed = posture == .postureClosed
-        guard closed != isClosed else { return }
+        if !closed { halfOpen = posture == .postureHalfOpened }
+        guard closed != isClosed else {
+            // Open and half open show the same display: only the half left of the hinge turns. While folding
+            // the animation's end takes it on.
+            if !closed, !folding { view.setFold(openAngle, hinge: openSkin.display.midX, animated: state == .running) }
+            return
+        }
+        let angle = closed ? view.foldAngle : openAngle
         isClosed = closed
-        chrome?.setFolded(closed)
         let entering = closed ? closedSkin : openSkin
         skin = entering
         // Played for a change one sees happen, not for the posture a quick boot comes back in.
         guard state == .running, let window, window.isVisible, let surface = lastSurface, let center = deviceCenterOnScreen else {
             view.setSkin(entering)
+            if !closed { view.setFold(openAngle, hinge: openSkin.display.midX, animated: false) }
             reshapeWindow(animate: false)
             return
         }
@@ -962,7 +980,7 @@ final class DeviceSession {
                     self.foldAnimation?.finish()
                     var animation: FoldAnimation?
                     animation = FoldAnimation(closing: closed, geometry: geometry, open: openPicture, closed: closedPicture,
-                                              closedCenter: (closedFrom, closedEnd), growth: growth, turns: turns,
+                                              openAngle: angle, closedCenter: (closedFrom, closedEnd), growth: growth, turns: turns,
                                               over: window) { [weak self] in
                         guard let self, let animation, self.foldAnimation === animation else { return }
                         let end = { [weak self] in
@@ -972,7 +990,7 @@ final class DeviceSession {
                             self.folding = false
                             self.foldStartedAt = nil
                             self.screenOn = nil
-                            self.foldEnded(turns: turns, center: landed)
+                            self.foldEnded(turns: turns, center: landed, angle: closed ? 0 : angle)
                             self.unfoldsTo = closed ? self.deviceCenterOnScreen.map { ($0, center) } : nil
                             animation.finish()
                         }
@@ -1051,7 +1069,7 @@ final class DeviceSession {
 
     /// Shows the live device again where and as the animation left it: held at the turn the emulator was asked
     /// for, which frames confirm shortly if they have not yet.
-    private func foldEnded(turns: Int, center: CGPoint) {
+    private func foldEnded(turns: Int, center: CGPoint, angle: CGFloat) {
         guard let view = deviceView else { return }
         window?.stopBoxAnimation()
         if turns != deviceTurns {
@@ -1059,13 +1077,18 @@ final class DeviceSession {
             view.setQuarterTurns(turns, animated: false)
         }
         placeDevice(center: center)
+        // Open as the animation left it, then as the posture is now, which may have changed meanwhile.
+        if !isClosed {
+            view.setFold(angle, hinge: openSkin.display.midX, animated: false)
+            if openAngle != angle { view.setFold(openAngle, hinge: openSkin.display.midX, animated: true) }
+        }
         view.isHidden = false
         if lastRotation != deviceTurns { deviceTurned(to: lastRotation) }
     }
 
     /// Where a device of `device` points centred at `center` ends up once its window is kept on `screen`.
     private func fittedCenter(device: CGSize, center: CGPoint, on screen: NSScreen?) -> CGPoint {
-        let box = DeviceShellView.boxSize(device: device)
+        let box = DeviceShellView.boxSize(device: device, sideRoom: sideRoom)
         let frame = CGRect(x: center.x - box.width / 2, y: center.y - device.height / 2 - DeviceShellView.bottomRoom,
                            width: box.width, height: box.height)
         let fitted = DeviceWindow.fitted(frame, on: screen)
@@ -1120,7 +1143,7 @@ final class DeviceSession {
 
     /// The box for a device of `device` points centred at `center`, kept on `screen`.
     private func boxFrame(device: CGSize, center: CGPoint, on screen: NSScreen?) -> CGRect {
-        let box = DeviceShellView.boxSize(device: device)
+        let box = DeviceShellView.boxSize(device: device, sideRoom: sideRoom)
         // The device sits `bottomRoom` above the box's bottom edge, centred across it.
         let frame = CGRect(x: (center.x - box.width / 2).rounded(), y: (center.y - device.height / 2 - DeviceShellView.bottomRoom).rounded(),
                            width: box.width, height: box.height)

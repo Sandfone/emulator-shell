@@ -90,15 +90,18 @@ binary then becomes `emulator.real`).
   the band above the device that shows it; it hides on release unless the pointer is in that band.
 - Typing: printable ASCII, Enter, Tab, Backspace, Delete, arrows, Home/End, Page Up/Down.
 - Esc or ⌘B: Back. ⇧⌘H: Home. ⇧⌘O: Overview. ⌘L: Power. ⌥⌘↑ / ⌥⌘↓: volume. ⌘S: screenshot to
-  the Desktop. ⌘← / ⌘→: rotate. ⇧⌘F: fold or unfold a foldable (also a title bar button).
+  the Desktop. ⌘← / ⌘→: rotate. ⇧⌘F: fold or unfold a foldable.
+- A foldable has a rail at the device's right, always shown, with its postures: open, closed and half
+  open; the one it is in is marked. Other devices have none.
 - The power and volume buttons drawn on the frame are clickable; holding one holds the key.
 - Right-click: the same device commands as a menu.
 
 ## Window size
 
 A device window is one borderless window holding the device, the room above it for the title bar
-(kept even while the bar is hidden) and the button pill below it, so its size is everything it
-shows. The bars do not scale and the window is always as wide as the device: on a narrow one the
+(kept even while the bar is hidden) and the button pill below it, and for a foldable room on either
+side for the posture rail (on the right; the left is as wide, so the device stays centred), so its
+size is everything it shows. The bars do not scale and are as wide as the device: on a narrow one the
 title bar leaves out the device name, then the volume and power buttons (also on the frame and in
 the Device menu), then rotate and screenshot; the window buttons at its leading edge and "More" always
 stay. Those are the system's close (the same as ⌘W), minimize (⌘M) and zoom buttons; zoom is greyed
@@ -189,11 +192,9 @@ its edges) from pictures of both states, while the live view is hidden: like a b
 left of the hinge, whose back is the outer display on Pixel Fold models, swings toward the viewer
 over onto the right one with some perspective, and past 90° shows the
 outer display, which lands exactly over the right half, their outlines sharing the top and the outer
-edge. The right half stays put throughout, as if lying on a table. As in Xcode's iPhone Duo, a turning display
-frosts over: as it tilts away from the viewer a blurred copy of its picture fades in over it, fully by
-60°, under a frame that stays sharp; nothing darkens it. Each half is drawn as its
-frame and its display apart for that; the blur is drawn at a quarter of the size (it loses nothing
-there) and set up when a foldable opens, so that the first fold does not wait for it. The animation
+edge. The right half stays put throughout, as if lying on a table. A turning half keeps its picture
+as it is, neither darkened nor blurred. Each half is drawn as its frame and its display apart, so that
+the display entered can light up on its own. The animation
 starts a fifteenth of a second after its pictures are handed over, so that the render server has
 taken them in and the start is not skipped. It moves like a real hinge over 0.6 s: stiff at
 first, then the magnets pull the halves shut for the last tenth, where they bounce once; opening,
@@ -232,6 +233,13 @@ within 1.2 s of the posture change, the first frame that is not blank does.
 Android's own unfold animation (the display lighting up from the hinge, icons moving out from the
 middle) does not play in the emulator, even with the hinge angle swept slowly from 0° to 180°: the
 layouts above are cut from one to the next.
+
+Half open (the "More" panel's 折叠姿态, or `adb emu posture 2`) shows the inner display with the half
+left of the hinge turned 30° toward the viewer about it, with the same depth as the fold animation,
+about as Xcode's iPhone Duo shows "Partially Open"; the right half stays put. The live view draws that
+half a second time for it (its own display layer showing the same frames, and frame), masking each copy
+to its side of the hinge, and taps on it are found through the turn. Between open and half open the half
+turns over 0.45 s; folding from half open starts from the turn, and unfolding into it ends there.
 
 A foldable is streamed at a size that fits either display at the chosen scale, so folding never asks
 for a new stream: asking while the emulator switches displays has crashed it (gfxstream writing a
