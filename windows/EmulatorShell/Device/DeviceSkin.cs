@@ -115,9 +115,10 @@ sealed class DeviceSkin
             // The mask draws the bezel's corners and the camera cutout over the display, partly repeating the
             // frame's edge. Drawn into the frame here, both are resampled together; as separate visuals each is
             // scaled to a slightly different rectangle and the edge they share no longer lines up.
+            var framePixels = frameOnly.GetPixelBytes();
             var frame = mask == null ? frameOnly : Render(skinSize, ds =>
             {
-                ds.DrawImage(mask, display, Bounds(mask), 1, CanvasImageInterpolation.HighQualityCubic);
+                ds.DrawImage(MaskInsideFrame(mask, display, skinSize, framePixels));
                 ds.DrawImage(frameOnly);
             });
 
@@ -126,7 +127,6 @@ sealed class DeviceSkin
                 : Render(new Size(display.Width, display.Height), ds =>
                     ds.FillRoundedRectangle(new Rect(0, 0, display.Width, display.Height), (float)cornerRadius, (float)cornerRadius, Colors.White));
 
-            var framePixels = frameOnly.GetPixelBytes();
             return new DeviceSkin
             {
                 Frame = frame,
@@ -248,6 +248,56 @@ sealed class DeviceSkin
             buttons.Add(new SideButton("AudioVolumeDown", "音量 −", RectFor(middle, rocker.End)));
         }
         return buttons;
+    }
+
+    /// The mask drawn at the display, less whatever of it lies outside the frame's outline.
+    ///
+    /// The mask's corners do not always follow the frame's: on the Pixel 9 its bottom-left one sticks out past
+    /// the frame's rounded edge, which showed as a small dark bump there. Outside is flood-filled from the image's
+    /// border through the frame's transparent pixels, so the display opening, enclosed by the frame, is not.
+    private static CanvasBitmap MaskInsideFrame(CanvasBitmap mask, Rect display, Size skinSize, byte[] framePixels)
+    {
+        using var placed = Render(skinSize, ds => ds.DrawImage(mask, display, Bounds(mask), 1, CanvasImageInterpolation.HighQualityCubic));
+        int width = (int)placed.SizeInPixels.Width, height = (int)placed.SizeInPixels.Height;
+        var pixels = placed.GetPixelBytes();
+        if (framePixels.Length != pixels.Length) return CanvasBitmap.CreateFromBytes(Device, pixels, width, height, DirectXPixelFormat.B8G8R8A8UIntNormalized, 96, CanvasAlphaMode.Premultiplied);
+        bool Clear(int index) => framePixels[index * 4 + 3] < 128;
+
+        var outside = new bool[width * height];
+        var stack = new Stack<int>();
+        for (var x = 0; x < width; x++)
+        {
+            stack.Push(x);
+            stack.Push((height - 1) * width + x);
+        }
+        for (var y = 0; y < height; y++)
+        {
+            stack.Push(y * width);
+            stack.Push(y * width + width - 1);
+        }
+        while (stack.Count > 0)
+        {
+            var index = stack.Pop();
+            if (outside[index] || !Clear(index)) continue;
+            outside[index] = true;
+            int x = index % width, y = index / width;
+            if (x > 0) stack.Push(index - 1);
+            if (x < width - 1) stack.Push(index + 1);
+            if (y > 0) stack.Push(index - width);
+            if (y < height - 1) stack.Push(index + width);
+        }
+        // A frame whose opening reaches its edge encloses nothing: keep the whole mask, cutout and corners.
+        var centre = Math.Clamp((int)(display.Y + display.Height / 2), 0, height - 1) * width + Math.Clamp((int)(display.X + display.Width / 2), 0, width - 1);
+        if (outside[centre]) Array.Clear(outside);
+        var removed = 0;
+        for (var i = 0; i < outside.Length; i++)
+        {
+            if (!outside[i] || pixels[i * 4 + 3] == 0) continue;
+            pixels[i * 4] = pixels[i * 4 + 1] = pixels[i * 4 + 2] = pixels[i * 4 + 3] = 0;
+            removed++;
+        }
+        Log.Debug($"mask: removed {removed} px outside the frame");
+        return CanvasBitmap.CreateFromBytes(Device, pixels, width, height, DirectXPixelFormat.B8G8R8A8UIntNormalized, 96, CanvasAlphaMode.Premultiplied);
     }
 
     /// Where the screen shows: the mask's opening, reaching a little under the bezel around it.

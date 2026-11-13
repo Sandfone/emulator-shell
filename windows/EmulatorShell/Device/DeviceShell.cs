@@ -83,13 +83,14 @@ sealed class DeviceShell
         UpdateClickRegion();
     }
 
-    /// Clicks reach the window on the device and its corner areas and on the bars; elsewhere, in the room above
-    /// the device while the title bar is hidden and beside the pill, they go to the windows behind it.
+    /// Clicks reach the window on the device, its corner areas and its shadow, and on the bars; elsewhere, in the
+    /// room above the device while the title bar is hidden and beside the pill, they go to the windows behind it.
+    /// The region also clips what the window draws, so it reaches as far as the shadow does.
     private void UpdateClickRegion()
     {
         var device = DeviceFrame;
-        var rects = new List<Rect> { new(device.X - ResizeHandle.Outside, device.Y - ResizeHandle.Outside,
-                                         device.Width + 2 * ResizeHandle.Outside, device.Height + 2 * ResizeHandle.Outside) };
+        const double reach = DeviceWindow.Margin;
+        var rects = new List<Rect> { new(device.X - reach, device.Y - reach, device.Width + 2 * reach, device.Height + 2 * reach) };
         if (chrome != null) rects.AddRange(chrome.Shapes);
         window.SetClickRegion(rects);
     }

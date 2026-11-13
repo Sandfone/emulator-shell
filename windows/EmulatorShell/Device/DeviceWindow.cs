@@ -23,7 +23,9 @@ namespace EmulatorShell;
 /// what it shows (`SetClickRegion`).
 sealed partial class DeviceWindow : Window
 {
-    public const double Margin = ResizeHandle.Outside;
+    /// Room around the box for the corner resize areas and the device's shadow, which the window's region would
+    /// otherwise cut off square.
+    public const double Margin = 16;
 
     /// The bars and resize handles, above the device; laid out in DIPs from the window's top left.
     public Canvas Root { get; } = new();

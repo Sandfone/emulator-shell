@@ -121,16 +121,17 @@ sealed partial class DeviceView : Grid
         frameVisual.Brush = frameBrush;
 
         // The window's shadow, as macOS gives a window: cast by everything the device shows (frame and screen,
-        // drawn underneath both), so the frame's hole casts none onto the screen.
+        // drawn underneath both), so the frame's hole casts none onto the screen. The silhouette, drawn small since
+        // the blur hides its detail, is only the shadow's mask: the visual has no brush, so it is not drawn itself.
+        // Drawn, its blocky edge showed through the frame's antialiased one, roughest round the corners.
         silhouetteBrush = compositor.CreateSurfaceBrush();
         silhouetteBrush.Stretch = CompositionStretch.Fill;
         silhouetteVisual = compositor.CreateSpriteVisual();
-        silhouetteVisual.Brush = silhouetteBrush;
         shadow = compositor.CreateDropShadow();
         shadow.BlurRadius = 10;
         shadow.Opacity = 0.35f;
         shadow.Color = Colors.Black;
-        shadow.SourcePolicy = CompositionDropShadowSourcePolicy.InheritFromVisualContent;
+        shadow.Mask = silhouetteBrush;
         silhouetteVisual.Shadow = shadow;
 
         highlightVisual = compositor.CreateSpriteVisual();
