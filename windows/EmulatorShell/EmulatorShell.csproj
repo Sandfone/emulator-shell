@@ -16,6 +16,8 @@
     <!-- Runs as a plain exe, like the macOS build: no MSIX, and the Windows App SDK travels with it. -->
     <WindowsPackageType>None</WindowsPackageType>
     <WindowsAppSDKSelfContained>true</WindowsAppSDKSelfContained>
+    <!-- Without it `dotnet publish` leaves out the app's .pri and compiled XAML (App.xbf), and the controls' styles. -->
+    <EnableMsixTooling>true</EnableMsixTooling>
     <!-- Main is in Program.cs: it reads the command line before XAML starts. -->
     <DefineConstants>$(DefineConstants);DISABLE_XAML_GENERATED_MAIN</DefineConstants>
     <Nullable>enable</Nullable>

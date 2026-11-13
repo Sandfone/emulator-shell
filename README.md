@@ -326,6 +326,16 @@ dotnet build windows/EmulatorShell -p:Platform=x64
 `windows/EmulatorShell/bin/x64/Debug/net10.0-windows10.0.22621.0/win-x64/EmulatorShell.exe [avd [emulator arguments]]`
 opens the manager or a device, as on macOS. `powershell -ExecutionPolicy Bypass -File windows\build.ps1` builds a
 release and installs it in `%LOCALAPPDATA%\Programs\Emulator Shell` with a Start menu shortcut.
+
+`powershell -ExecutionPolicy Bypass -File windows\package.ps1` builds the installer for other PCs,
+`windows\dist\EmulatorShell-<version>-x64.msi` (about 73 MB), with WiX 5 (`dotnet tool install --global wix
+--version 5.0.2`) from `windows\installer\EmulatorShell.wxs`. The app and the forwarder are published
+self-contained, so the PC needs neither .NET nor the Windows App SDK. The MSI installs per user, without an
+administrator, into `%LOCALAPPDATA%\Programs\Emulator Shell` with a Start menu shortcut, and uninstalls from
+Settings › Apps; a newer version, or a rebuild of the same one, replaces what is installed. The version is
+`1.0.<number of commits>` unless `-Version` says otherwise. Publishing needs `EnableMsixTooling` in the project:
+without it `dotnet publish` leaves out the app's `.pri`, and the manager fails to find the controls' styles.
+
 `windows\scripts\make-icon.ps1` redraws `Assets\AppIcon.ico` and `AppIcon.png`.
 
 ### Differences from macOS

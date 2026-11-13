@@ -7,3 +7,6 @@
 windows/**/bin/
 windows/**/obj/
 windows/**/*.user
+
+# Release installers (windows\package.ps1)
+windows/dist/
