@@ -5,6 +5,9 @@ emulator's own window. The emulator runs headless (`-no-window -gpu host -grpc <
 the display over the emulator's gRPC API and composites it under the skin artwork with
 Core Animation, so the frame edge and screen corners are antialiased against the desktop.
 
+A Windows version lives in `windows/` (WinUI 3 and C#); see [Windows](#windows) below. The rest of this
+document describes the macOS app, which the Windows one follows feature for feature.
+
 ## Run
 
 ```bash
@@ -302,3 +305,81 @@ takes a few seconds.
 - No scroll wheel or multi-touch.
 - A foldable shows only the open or the closed display, not both at once (Pixel Fold's rear display
   mode), and the half-open posture is drawn as open.
+
+## Windows
+
+`windows/` holds the same app for Windows 10 (19041) and later: WinUI 3 (Windows App SDK 1.8, bundled with the
+app), C# on .NET 10, the emulator's gRPC API through `Grpc.Net.Client` from the same protos (`windows/Protos`),
+and the device drawn with the Visual layer and Win2D. Device window, device manager, "More" panel, foldables and
+the SDK forwarder all work as described above, with these differences.
+
+### Build and run
+
+Requires the .NET 10 SDK (`winget install Microsoft.DotNet.SDK.10`) and the Android SDK at `%ANDROID_HOME%`
+(or `%LOCALAPPDATA%\Android\Sdk`) with the command-line tools. `avdmanager` and `sdkmanager` run with Android
+Studio's bundled Java when `JAVA_HOME` is unset or older than 17.
+
+```bash
+dotnet build windows/EmulatorShell -p:Platform=x64
+```
+
+`windows/EmulatorShell/bin/x64/Debug/net10.0-windows10.0.22621.0/win-x64/EmulatorShell.exe [avd [emulator arguments]]`
+opens the manager or a device, as on macOS. `powershell -ExecutionPolicy Bypass -File windows\build.ps1` builds a
+release and installs it in `%LOCALAPPDATA%\Programs\Emulator Shell` with a Start menu shortcut.
+`windows\scripts\make-icon.ps1` redraws `Assets\AppIcon.ico` and `AppIcon.png`.
+
+### Differences from macOS
+
+- **Frames** ride inside the gRPC messages. The emulator's shared-memory transport (`ImageTransport.MMAP`) sends
+  no frames at all from the Windows emulator, whatever the handle (`file:///…`, a path, a named mapping). Over
+  gRPC on localhost the display runs at 40–60 fps at about 800 × 1800 pixels.
+- **Shutting down** uses gRPC `setVmState(SHUTDOWN)`, which saves the quick-boot snapshot like closing the
+  emulator's window. A console Ctrl+C reaches `emulator.exe`, which on Windows is a launcher running
+  `qemu-system-x86_64-headless.exe` as a child; the launcher's exit takes the emulator down mid-save. As on macOS
+  it starts with `ANDROID_EMULATOR_WAIT_TIME_BEFORE_KILL=90`, so it is not killed 20 s into saving. Emulators
+  started elsewhere are stopped through their gRPC port (with their `grpc.token`), or `adb emu kill` without one.
+- **Sound** stays with the emulator: the deadlock that makes the macOS app play it is in the emulator's CoreAudio
+  backend, which the Windows emulator does not use. So there is no `-audio none`, and 麦克风 switches the host
+  microphone with `setMicrophoneState` at once, without restarting the device.
+- **Devices started elsewhere**: 在本 App 中显示 and `EmulatorShell <avd>` connect as on macOS (bearer token from
+  `grpc.token`; `-grpc-use-jwt` emulators are not supported). The program that started a device is the nearest of
+  the emulator process and its ancestors with a window of its own; 切换到 brings that window forward. Another
+  Emulator Shell is asked to bring its device window forward over a named pipe, `EmulatorShell.<pid>`, which each
+  copy listens on.
+- **The window** is borderless and see-through (a transparent system backdrop with the DWM frame extended over
+  it). Its window region keeps clicks to the device, its corners and the bars; elsewhere they reach the windows
+  behind, as on macOS. While the device turns, folds, half opens, is resized or changes to one of the window
+  sizes, the window instead covers the area the device moves through and only the content moves, drawn on the
+  same frame as the bars; so the fold animation plays in the device window itself rather than in a window over
+  it, and the window sizes grow and shrink the live device (stretched, then drawn again at the end) rather than
+  a still picture of it. Window positions and sizes are in screen pixels, scaled per monitor.
+- **Keyboard**: the macOS menu shortcuts use Ctrl for ⌘: Ctrl+B Back, Ctrl+Shift+H Home, Ctrl+Shift+O
+  Overview, Ctrl+L Power, Ctrl+Alt+↑/↓ volume, Ctrl+S screenshot, Ctrl+←/→ rotate, Ctrl+Shift+F fold, Ctrl+1/2/3
+  sizes, Ctrl+=/Ctrl+− zoom, Ctrl+W close, Ctrl+M minimize, Ctrl+Shift+2 manager, Ctrl+Q quit. There is no menu
+  bar: the device window's context menu has the device commands and the window sizes, and the manager's ⋯ button
+  the forwarder, the command-line tool and Quit. The window's minimize and close buttons sit at the trailing end
+  of the title bar.
+- **Files**: settings in `%LOCALAPPDATA%\EmulatorShell\settings.json`; emulator output in
+  `%LOCALAPPDATA%\EmulatorShell\Logs\emulator-<avd>.log`; running emulators are found through
+  `%TEMP%\avd\running\pid_*.ini`. System images listed are the host's ABI (`x86_64`, or `arm64-v8a` on ARM).
+- **SDK forwarder**: `emulator.exe` cannot be a script, so the forwarder is a small program
+  (`windows/Forwarder`, built next to the app as `EmulatorShellForwarder.exe`). Turning it on copies it over
+  `emulator\emulator.exe`, keeps the original as `emulator.real.exe`, and writes the app's path to
+  `emulator\emulator-shell.ini`. It waits for the program it starts and returns its exit code. Calls are logged to
+  `%LOCALAPPDATA%\EmulatorShell\Logs\forwarder.log`.
+- **Command-line tool**: `emulator-shell.cmd` in `%LOCALAPPDATA%\Microsoft\WindowsApps`, which is on the PATH.
+- **Quitting** ends the app once the manager and every device window are closed; the emulators finish saving
+  their snapshots in the background first.
+
+Debug builds read `EMULATOR_SHELL_TEST_SCRIPT` (device windows) and `EMULATOR_SHELL_MANAGER_SCRIPT` (the
+manager): `;`-separated commands such as `rotate right`, `fold`, `resize 2 200 300`, `more`, `new`, `images`,
+for checking the windows without driving the mouse (see `DeviceSession.Debug.cs` and `ManagerWindow.Debug.cs`).
+
+Known issues, both in the Windows emulator (36.3.10) and recovered by a cold boot (the manager's ⋯ menu):
+
+- A quick-boot snapshot saved within seconds of a boot or of resuming one has come back frozen (the screen keeps
+  its last picture and ignores input; the VM reports running). Snapshots saved after longer sessions resume
+  normally.
+- A foldable resumed from its snapshot has lost its outer display: closed, the emulator logs `Display with id: 6
+  does not exist` and streams nothing, so the closed device stays dark. After a cold boot it folds and unfolds as
+  described above.

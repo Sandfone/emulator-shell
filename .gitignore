@@ -3,3 +3,7 @@
 *.xcodeproj
 # Partial SDK install left by a tool that did not expand ~
 /~/
+# Windows build (windows/)
+windows/**/bin/
+windows/**/obj/
+windows/**/*.user

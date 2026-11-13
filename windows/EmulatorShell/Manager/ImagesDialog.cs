@@ -1,0 +1,180 @@
+using Microsoft.UI.Text;
+using Microsoft.UI.Xaml;
+using Microsoft.UI.Xaml.Controls;
+using Microsoft.UI.Xaml.Media;
+using Windows.UI;
+
+namespace EmulatorShell;
+
+/// The system images: installed, broken and downloadable ones for this computer's architecture.
+sealed partial class ImagesDialog : ContentDialog
+{
+    private readonly DeviceManager manager;
+    private ImageFamily? family;
+    private bool showPreview;
+    private readonly StackPanel rows = new();
+    private readonly TextBlock header = new() { FontSize = 12, Opacity = 0.65, VerticalAlignment = VerticalAlignment.Center };
+    private readonly ProgressRing loading = new() { Width = 14, Height = 14, IsActive = true };
+
+    public ImagesDialog(DeviceManager manager)
+    {
+        this.manager = manager;
+        Title = "系统镜像";
+        CloseButtonText = "完成";
+        DefaultButton = ContentDialogButton.Close;
+
+        var families = new SelectorBar();
+        foreach (var (title, value) in new (string, ImageFamily?)[] { ("全部", null), (ImageFamily.Phone.Title(), ImageFamily.Phone), (ImageFamily.Wear.Title(), ImageFamily.Wear),
+                                                                       (ImageFamily.Tv.Title(), ImageFamily.Tv), (ImageFamily.Auto.Title(), ImageFamily.Auto) })
+        {
+            var item = new SelectorBarItem { Text = title, Tag = value };
+            families.Items.Add(item);
+            if (value == null) families.SelectedItem = item;
+        }
+        families.SelectionChanged += (_, _) =>
+        {
+            family = families.SelectedItem?.Tag as ImageFamily?;
+            Rebuild();
+        };
+        var preview = new ToggleSwitch { Header = null, OnContent = "显示预览版和 Canary", OffContent = "显示预览版和 Canary", HorizontalAlignment = HorizontalAlignment.Right };
+        preview.Toggled += (_, _) =>
+        {
+            showPreview = preview.IsOn;
+            Rebuild();
+        };
+        var filters = new Grid();
+        filters.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(1, GridUnitType.Star) });
+        filters.ColumnDefinitions.Add(new ColumnDefinition { Width = GridLength.Auto });
+        filters.Children.Add(families);
+        Grid.SetColumn(preview, 1);
+        filters.Children.Add(preview);
+
+        var top = new StackPanel { Orientation = Orientation.Horizontal, Spacing = 8, Children = { loading, header } };
+        var columns = HeaderRow();
+        var table = new Border
+        {
+            CornerRadius = new CornerRadius(8),
+            BorderBrush = (Brush)Application.Current.Resources["CardStrokeColorDefaultBrush"],
+            BorderThickness = new Thickness(1),
+            Background = (Brush)Application.Current.Resources["CardBackgroundFillColorDefaultBrush"],
+            Child = new Grid
+            {
+                RowDefinitions = { new RowDefinition { Height = GridLength.Auto }, new RowDefinition { Height = new GridLength(420) } },
+                Children = { columns, WithRow(new ScrollViewer { Content = rows }, 1) },
+            },
+        };
+        Content = new StackPanel
+        {
+            Width = 820,
+            Spacing = 12,
+            Children =
+            {
+                top,
+                filters,
+                table,
+                new TextBlock { Text = "正被模拟器使用的镜像不能删除。", FontSize = 12, Opacity = 0.65 },
+            },
+        };
+        manager.Changed += Rebuild;
+        Closed += (_, _) => manager.Changed -= Rebuild;
+        Opened += (_, _) => manager.RefreshAvailableImages();
+        Rebuild();
+    }
+
+    private static FrameworkElement WithRow(FrameworkElement element, int row)
+    {
+        Grid.SetRow(element, row);
+        return element;
+    }
+
+    private static Grid Columns()
+    {
+        var grid = new Grid { ColumnSpacing = 12, Padding = new Thickness(14, 8, 14, 8) };
+        grid.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(160) });
+        grid.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(1, GridUnitType.Star) });
+        grid.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(210) });
+        grid.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(90) });
+        return grid;
+    }
+
+    private static UIElement HeaderRow()
+    {
+        var grid = Columns();
+        string[] titles = ["版本", "类型", "状态", ""];
+        for (var i = 0; i < titles.Length; i++)
+        {
+            var text = new TextBlock { Text = titles[i], FontSize = 12, FontWeight = FontWeights.SemiBold, Opacity = 0.65 };
+            Grid.SetColumn(text, i);
+            grid.Children.Add(text);
+        }
+        return grid;
+    }
+
+    private void Rebuild()
+    {
+        loading.Visibility = manager.LoadingAvailableImages ? Visibility.Visible : Visibility.Collapsed;
+        var home = Environment.GetFolderPath(Environment.SpecialFolder.UserProfile);
+        header.Text = manager.LoadingAvailableImages ? "正在获取可下载列表…"
+            : $"SDK 位置：{Sdk.Root.Replace(home, "~")} · 只列出 {Sdk.HostAbi} 镜像";
+        rows.Children.Clear();
+        var visible = manager.Images.Where(i => (family == null || i.Family == family) && (showPreview || !i.IsPreview) && i.Family != ImageFamily.Other);
+        foreach (var image in visible)
+        {
+            if (rows.Children.Count > 0) rows.Children.Add(new Border { Height = 1, Background = (Brush)Application.Current.Resources["DividerStrokeColorDefaultBrush"] });
+            var row = Columns();
+            row.Children.Add(new TextBlock { Text = image.ApiLabel, FontWeight = FontWeights.SemiBold, VerticalAlignment = VerticalAlignment.Center });
+            var kind = new TextBlock { Text = image.KindLabel, TextTrimming = TextTrimming.CharacterEllipsis, VerticalAlignment = VerticalAlignment.Center };
+            Grid.SetColumn(kind, 1);
+            row.Children.Add(kind);
+            var status = Status(image);
+            Grid.SetColumn((FrameworkElement)status, 2);
+            row.Children.Add(status);
+            var action = Action(image);
+            Grid.SetColumn(action, 3);
+            row.Children.Add(action);
+            rows.Children.Add(row);
+        }
+    }
+
+    private UIElement Status(SystemImage image)
+    {
+        if (manager.Downloads.TryGetValue(image.Id, out var progress))
+        {
+            var grid = new Grid { ColumnSpacing = 8, VerticalAlignment = VerticalAlignment.Center };
+            grid.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(1, GridUnitType.Star) });
+            grid.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(36) });
+            grid.Children.Add(new ProgressBar { Value = progress * 100, VerticalAlignment = VerticalAlignment.Center });
+            var percent = new TextBlock { Text = $"{(int)(progress * 100)}%", FontSize = 12, TextAlignment = TextAlignment.Right };
+            Grid.SetColumn(percent, 1);
+            grid.Children.Add(percent);
+            return grid;
+        }
+        return image.Status switch
+        {
+            ImageStatus.Installed => new TextBlock
+            {
+                VerticalAlignment = VerticalAlignment.Center,
+                Text = string.Join(" · ", new[] { "已安装", manager.ImageSizes.TryGetValue(image.Id, out var size) ? Sizes.Format(size) : null, manager.IsInUse(image) ? "使用中" : null }.OfType<string>()),
+            },
+            ImageStatus.Broken => new TextBlock { Text = "安装不完整", VerticalAlignment = VerticalAlignment.Center, Foreground = new SolidColorBrush(Color.FromArgb(255, 0xC8, 0x6A, 0x00)) },
+            _ => new TextBlock { Text = "可下载", Opacity = 0.65, VerticalAlignment = VerticalAlignment.Center },
+        };
+    }
+
+    private Button Action(SystemImage image)
+    {
+        Button Make(string title, Action action, bool enabled = true)
+        {
+            var button = new Button { Content = title, IsEnabled = enabled, HorizontalAlignment = HorizontalAlignment.Stretch };
+            button.Click += (_, _) => action();
+            return button;
+        }
+        if (manager.Downloads.ContainsKey(image.Id)) return Make("取消", () => manager.CancelDownload(image));
+        return image.Status switch
+        {
+            ImageStatus.Installed => Make("删除", () => manager.Uninstall(image), !manager.IsInUse(image) && !manager.Busy.Contains(image.Id)),
+            ImageStatus.Broken => Make("重新下载", () => manager.Download(image)),
+            _ => Make("下载", () => manager.Download(image)),
+        };
+    }
+}
