@@ -91,6 +91,8 @@ final class DeviceSession {
     private var holdingSince: Date?
     /// A fold or unfold playing, with the live view hidden.
     private var foldAnimation: FoldAnimation?
+    /// A Window menu size change playing, with the live view hidden.
+    private var zoomAnimation: ZoomAnimation?
     /// After folding: where the closed device was put, and where the open one was, so that unfolding a device
     /// that has not been moved meanwhile puts it back exactly, without rounding creeping in.
     private var unfoldsTo: (closed: CGPoint, open: CGPoint)?
@@ -333,8 +335,15 @@ final class DeviceSession {
 
     /// Shows the device at one of the Window menu's sizes.
     func zoom(_ zoom: DeviceZoom) {
-        guard let window, let view = deviceView else { return }
+        guard let window, let view = deviceView, !folding else { return }
         let screen = window.screen ?? NSScreen.main
+        // One still playing ends where the window is now, which the next starts from.
+        if let playing = zoomAnimation {
+            window.stopBoxAnimation()
+            view.isHidden = false
+            playing.finish()
+            zoomAnimation = nil
+        }
         let target: CGFloat
         switch zoom {
         case .actualPixels:
@@ -360,12 +369,50 @@ final class DeviceSession {
         let box = DeviceShellView.boxSize(device: view.size(forQuarterTurns: deviceTurns, scale: scale), sideRoom: sideRoom)
         let old = window.box
         let frame = CGRect(x: (old.midX - box.width / 2).rounded(), y: (old.maxY - box.height).rounded(), width: box.width, height: box.height)
-        view.setLiveScale(scale)
-        window.setBox(DeviceWindow.fitted(frame, on: screen), display: true)
         chrome?.showResizeReadout(readout(scale, on: screen))
         chrome?.showResizeReadout(nil)
-        commitSize()
+        let fitted = DeviceWindow.fitted(frame, on: screen)
+        // The window resizes over the same time, its bars with it. The device is stretched to fit each step's
+        // box, as during a corner drag, and drawn anew at the end; while a picture of it plays the change
+        // (`ZoomAnimation`) it is hidden, as the steps of the window and of the device drawn to fit them would
+        // reach the screen a frame apart. A half-open device, which a flat picture would not show, is seen
+        // stepping.
+        let animation = view.foldAngle == 0 ? zoomPicture(to: scale, box: fitted) : nil
+        let start = animation?.start ?? CACurrentMediaTime()
+        zoomAnimation = animation
+        let rooms = DeviceShellView.topRoom + DeviceShellView.bottomRoom
+        let skinHeight = view.skinSize(forQuarterTurns: deviceTurns).height
+        window.setBox(fitted, duration: Self.zoomDuration, start: start, step: { [weak view] box in
+            view?.setLiveScale((box.height - rooms) / skinHeight)
+            if animation != nil { view?.isHidden = true }
+        }, completion: { [weak self, weak view] in
+            view?.setLiveScale(scale)
+            self?.commitSize()
+            view?.isHidden = false
+            guard let animation, self?.zoomAnimation === animation else { return }
+            self?.zoomAnimation = nil
+            // A moment after the live view is back, so that no frame shows neither.
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.05) { animation.finish() }
+        })
     }
+
+    /// The device as it is now, playing its change to `scale` in `box`.
+    private func zoomPicture(to scale: CGFloat, box: CGRect) -> ZoomAnimation? {
+        guard let window, window.isVisible, let view = deviceView, let surface = lastSurface,
+              let center = deviceCenterOnScreen, let screen = Self.image(of: surface) else { return nil }
+        let toSize = view.size(forQuarterTurns: 0, scale: scale), fromSize = view.size(forQuarterTurns: 0, scale: view.liveScale)
+        // Enough pixels for the larger of the two sizes.
+        let backing = window.backingScaleFactor * max(1, fromSize.width / toSize.width)
+        guard let picture = FoldAnimation.picture(skin: skin, screen: screen, screenTurns: lastRotation, size: toSize,
+                                                  scale: backing) else { return nil }
+        let shown = view.size(forQuarterTurns: deviceTurns, scale: scale)
+        let landed = CGPoint(x: (box.midX - shown.width / 2).rounded() + shown.width / 2,
+                             y: box.minY + DeviceShellView.bottomRoom + shown.height / 2)
+        return ZoomAnimation(picture: picture, backing: backing, turns: deviceTurns, from: (center, fromSize),
+                             to: (landed, toSize), duration: Self.zoomDuration, over: window)
+    }
+
+    private static let zoomDuration: TimeInterval = 0.3
 
     /// Whether `zoom` would change the window, for the menu.
     func canZoom(_ zoom: DeviceZoom) -> Bool {
@@ -773,7 +820,7 @@ final class DeviceSession {
         shell?.needsLayout = true
         if animate {
             // Along with the device's turn, ending with it.
-            window.setBox(fitted, duration: DeviceView.turnDuration) { [weak self] in self?.commitSize() }
+            window.setBox(fitted, duration: DeviceView.turnDuration, completion: { [weak self] in self?.commitSize() })
         } else {
             window.setBox(fitted, display: true)
             commitSize()

@@ -122,7 +122,13 @@ around it holds the outer part of the corner resize areas.
   new size and frames are requested at the new pixel size.
 - Window menu: 像素一比一 ⌘1 (one device pixel per screen pixel), 物理尺寸 ⌘2 (the real
   device's size, from `hw.lcd.density` and the screen's size in millimetres), 适合屏幕 ⌘3,
-  放大 ⌘+ / 缩小 ⌘− (in steps of 10 % of one-to-one).
+  放大 ⌘+ / 缩小 ⌘− (in steps of 10 % of one-to-one). Each grows or shrinks the device over 0.3 s,
+  eased, from a still picture in a transparent window over the device's (`ZoomAnimation`), as the fold
+  animation does: a step of the window's frame and the device drawn to fit it reach the screen a frame
+  apart, which shook the device a few points all the way. The window resizes underneath over the same
+  time, its edges each eased and rounded on their own so that the top stays put, and at the end the
+  device is drawn again at the new size and shown live. Half open, which the flat picture would not
+  show, the device is stretched to each step of the window instead.
 - Limits: the device's long side is at least 360 pt, and the whole window fits the screen's visible
   area. A window dragged partly off the screen moves back once released.
 - Rotating animates the turn over 0.3 s, and the window resizes along with it, eased the same way;

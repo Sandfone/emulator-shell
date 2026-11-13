@@ -557,19 +557,23 @@ final class DeviceWindow: NSWindow {
     }
 
     /// Moves and resizes to `box` over `duration` from `start` (a `CACurrentMediaTime()`), eased like the
-    /// device's own Core Animation animations, which it goes along with; `completion` runs at the end.
+    /// device's own Core Animation animations, which it goes along with; `step` runs with the box about to be
+    /// set each time the window changes, so whatever follows the window can fit it exactly, and `completion`
+    /// at the end.
     ///
     /// Stepped on each refresh of the display, at the point in time the device's animation has reached, so
     /// the two stay together: an AppKit animator runs on its own clock, falls behind when this thread is
     /// busy and lands after the device does, nudging the window once the live view is back.
-    func setBox(_ box: CGRect, duration: TimeInterval, start: CFTimeInterval = CACurrentMediaTime(), completion: (() -> Void)? = nil) {
+    func setBox(_ box: CGRect, duration: TimeInterval, start: CFTimeInterval = CACurrentMediaTime(),
+                step: ((CGRect) -> Void)? = nil, completion: (() -> Void)? = nil) {
         stopBoxAnimation()
         let frame = box.insetBy(dx: -Self.margin, dy: -Self.margin)
         guard frame != self.frame else {
+            step?(box)
             completion?()
             return
         }
-        boxAnimation = (from: self.frame, to: frame, start: start, duration: duration, completion: completion)
+        boxAnimation = (from: self.frame, to: frame, start: start, duration: duration, step: step, completion: completion)
         // The screen's link rather than the window's: that one stops while the window is covered, as it is by
         // the fold animation's overlay.
         let link = (screen ?? NSScreen.main)?.displayLink(target: self, selector: #selector(stepBoxAnimation))
@@ -592,7 +596,8 @@ final class DeviceWindow: NSWindow {
         boxAnimation = nil
     }
 
-    private var boxAnimation: (from: CGRect, to: CGRect, start: CFTimeInterval, duration: TimeInterval, completion: (() -> Void)?)?
+    private var boxAnimation: (from: CGRect, to: CGRect, start: CFTimeInterval, duration: TimeInterval,
+                               step: ((CGRect) -> Void)?, completion: (() -> Void)?)?
     private var boxLink: CADisplayLink?
     private var boxAnimationID = 0
 
@@ -600,11 +605,16 @@ final class DeviceWindow: NSWindow {
         guard let animation = boxAnimation else { return stopBoxAnimation() }
         let progress = min(max((CACurrentMediaTime() - animation.start) / animation.duration, 0), 1)
         let eased = Self.easeInOut(progress)
+        // Each edge on its own, rounded: an edge that does not move stays exactly where it is, where rounding the
+        // origin and the size apart would nudge it a point back and forth.
         func mix(_ a: CGFloat, _ b: CGFloat) -> CGFloat { (a + (b - a) * eased).rounded() }
-        let frame = progress >= 1 ? animation.to : CGRect(x: mix(animation.from.minX, animation.to.minX),
-                                                           y: mix(animation.from.minY, animation.to.minY),
-                                                           width: mix(animation.from.width, animation.to.width),
-                                                           height: mix(animation.from.height, animation.to.height))
+        let from = animation.from, to = animation.to
+        let frame = progress >= 1 ? to : {
+            let minX = mix(from.minX, to.minX), minY = mix(from.minY, to.minY)
+            return CGRect(x: minX, y: minY, width: mix(from.maxX, to.maxX) - minX, height: mix(from.maxY, to.maxY) - minY)
+        }()
+        // The last step lands exactly, even where the window's whole points do not change.
+        if frame != self.frame || progress >= 1 { animation.step?(frame.insetBy(dx: Self.margin, dy: Self.margin)) }
         if frame != self.frame { setFrame(frame, display: true) }
         guard progress >= 1 else { return }
         stopBoxAnimation()
