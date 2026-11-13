@@ -74,6 +74,8 @@ binary then becomes `emulator.real`).
 |---|---|
 | List AVDs | `~/.android/avd/*.ini` and each AVD's `config.ini`; re-read whenever the app becomes active |
 | Running status | this app's sessions, plus `pid_*.ini` files emulators write to `~/Library/Caches/TemporaryItems/avd/running`, so emulators started elsewhere show up too |
+| Show a device started elsewhere | **在本 App 中显示** connects a device window to the `grpc.port` in its `pid_*.ini` (with `grpc.token` as a bearer token when Studio set one; emulators that use `-grpc-use-jwt` are not supported). Closing that window only lets go of the device; **停止** shuts it down with SIGINT. Its sound stays with the program that started it. `EmulatorShell <avd>` for a device already running elsewhere does the same |
+| Switch to the app that started it | the nearest of the emulator process and its ancestors that is a regular app (Android Studio, Terminal, the emulator's own window), activated; another Emulator Shell is also asked over a distributed notification to bring that device's window forward |
 | Start / cold boot | `emulator -avd <id> -no-window -gpu host -grpc <port>` (`-no-snapshot-load` for cold boot) |
 | Create | `avdmanager create avd -n <id> -k <image> -d <device> -c <sd>M`, then the form's values written into `config.ini` |
 | Edit | `config.ini` only; device type and SD card size are fixed after creation |

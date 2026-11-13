@@ -9,6 +9,21 @@ typealias PhoneOperation = Android_Emulation_Control_PhoneCall.Operation
 typealias PostureValue = Android_Emulation_Control_Posture.PostureValue
 typealias SnapshotDetails = Android_Emulation_Control_SnapshotDetails
 
+/// Adds `authorization: Bearer <token>` to every call.
+private struct BearerToken: ClientInterceptor {
+    let token: String
+
+    func intercept<Input: Sendable, Output: Sendable>(
+        request: StreamingClientRequest<Input>,
+        context: ClientContext,
+        next: (StreamingClientRequest<Input>, ClientContext) async throws -> StreamingClientResponse<Output>
+    ) async throws -> StreamingClientResponse<Output> {
+        var request = request
+        request.metadata.replaceOrAddString("Bearer \(token)", forKey: "authorization")
+        return try await next(request, context)
+    }
+}
+
 /// Thin wrapper over the emulator's gRPC services: `EmulatorController` and `SnapshotService`.
 final class EmulatorClient: Sendable {
     private static let maxFrameBytes = 64 * 1024 * 1024
@@ -17,12 +32,14 @@ final class EmulatorClient: Sendable {
     private let controller: Controller
     private let snapshotService: Android_Emulation_Control_SnapshotService.Client<HTTP2ClientTransport.Posix>
 
-    init(port: Int) throws {
+    /// `token` is the bearer token an emulator started with `-grpc-use-token` (as Android Studio does) wants
+    /// on every call; it writes it into its `pid_*.ini` as `grpc.token`.
+    init(port: Int, token: String? = nil) throws {
         let transport = try HTTP2ClientTransport.Posix(
             target: .ipv4(address: "127.0.0.1", port: port),
             transportSecurity: .plaintext
         )
-        grpc = GRPCClient(transport: transport)
+        grpc = GRPCClient(transport: transport, interceptors: token.map { [BearerToken(token: $0)] } ?? [])
         controller = Controller(wrapping: grpc)
         snapshotService = .init(wrapping: grpc)
     }

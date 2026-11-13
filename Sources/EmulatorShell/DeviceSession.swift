@@ -69,6 +69,11 @@ final class DeviceSession {
     private(set) var window: DeviceWindow?
 
     private var emulator: EmulatorProcess?
+    /// Set for a device another program started, which this window only shows: closing it leaves the
+    /// emulator running, and only stopping it from the manager shuts it down.
+    private(set) var attached: RunningEmulator?
+    /// Tells an attached session that its emulator has exited.
+    private var exitWatch: DispatchSourceProcess?
     private var client: EmulatorClient?
     private var deviceView: DeviceView?
     private var shell: DeviceShellView?
@@ -142,20 +147,37 @@ final class DeviceSession {
         self.grpcPort = grpcPort
         openSkin = try DeviceSkin.load(avd: avd)
         skin = openSkin
+        closedSkin = Self.loadClosedSkin(avd: avd, openSkin: openSkin)
+        showWindow(cascade: cascade)
+        try startEmulator(coldBoot: coldBoot, extraArguments: extraArguments)
+    }
+
+    /// Shows a device another program (Android Studio, the command line, another Emulator Shell) started,
+    /// over the gRPC port it announced. Its sound stays with that program.
+    init(avd: Avd, attachingTo running: RunningEmulator, cascade: Int) throws {
+        guard let port = running.grpcPort else { throw ShellError("emulator announced no gRPC port") }
+        self.avd = avd
+        grpcPort = port
+        attached = running
+        openSkin = try DeviceSkin.load(avd: avd)
+        skin = openSkin
+        closedSkin = Self.loadClosedSkin(avd: avd, openSkin: openSkin)
+        showWindow(cascade: cascade)
+        try attach(running)
+    }
+
+    /// The outer display's pixels are denser than the inner one's, so its skin draws the same device taller;
+    /// scaled to the open skin's, the closed device is the open one's right half. Cut down to the device
+    /// first, so that it fits the screen wherever the open one does.
+    private static func loadClosedSkin(avd: Avd, openSkin: DeviceSkin) -> DeviceSkin? {
         do {
-            // The outer display's pixels are denser than the inner one's, so its skin draws the same device
-            // taller; scaled to the open skin's, the closed device is the open one's right half. Cut down to
-            // the device first, so that it fits the screen wherever the open one does.
-            let openSkin = openSkin
-            closedSkin = try avd.closedSkinFolder.map(DeviceSkin.load(folder:)).map {
+            return try avd.closedSkinFolder.map(DeviceSkin.load(folder:)).map {
                 $0.croppedToBody().scaled(by: openSkin.body.height / $0.body.height)
             }
         } catch {
             Log.error("\(avd.id): closed skin unusable, staying with the open one: \(error)")
-            closedSkin = nil
+            return nil
         }
-        showWindow(cascade: cascade)
-        try startEmulator(coldBoot: coldBoot, extraArguments: extraArguments)
     }
 
     var serial: String? {
@@ -173,6 +195,11 @@ final class DeviceSession {
         state = .stopping
         window?.orderOut(nil)
         closeStreams()
+        if let attached {
+            // Whoever started it sees it exit, as when its own window closes; the exit watch ends this session.
+            kill(attached.pid, SIGINT)
+            return
+        }
         emulator?.interrupt()
         tasks.append(Task { [weak self] in
             try? await Task.sleep(for: .seconds(EmulatorProcess.shutdownTimeout))
@@ -180,10 +207,16 @@ final class DeviceSession {
         })
     }
 
+    /// Closing the window: shuts down a device this app started, only lets go of one it is just showing.
+    func close() {
+        if attached != nil { tearDown() } else { stop() }
+    }
+
     /// For quitting: every device window goes away at once and the emulators save their snapshots in
     /// parallel, without holding up the main thread; `done` runs once they have all exited.
     static func stopAll(_ sessions: [DeviceSession], then done: @escaping () -> Void) {
-        let stopping = sessions.filter { $0.state == .booting || $0.state == .running }
+        sessions.filter { $0.attached != nil }.forEach { $0.tearDown() }
+        let stopping = sessions.filter { $0.attached == nil && ($0.state == .booting || $0.state == .running) }
         for session in stopping {
             session.state = .stopping
             session.window?.orderOut(nil)
@@ -585,8 +618,9 @@ final class DeviceSession {
 
     // MARK: - Emulator
 
-    private func startEmulator(coldBoot: Bool, extraArguments: [String]) throws {
-        let client = try EmulatorClient(port: grpcPort)
+    /// Opens the gRPC connection and the queue device input goes through.
+    private func makeClient(token: String? = nil) throws -> EmulatorClient {
+        let client = try EmulatorClient(port: grpcPort, token: token)
         self.client = client
         tasks.append(Task.detached {
             do { try await client.run() } catch { Log.error("gRPC connections ended: \(error)") }
@@ -596,6 +630,24 @@ final class DeviceSession {
         tasks.append(Task.detached {
             for await send in stream { await send() }
         })
+        return client
+    }
+
+    private func attach(_ running: RunningEmulator) throws {
+        let client = try makeClient(token: running.grpcToken)
+        let watch = DispatchSource.makeProcessSource(identifier: running.pid, eventMask: .exit, queue: .main)
+        watch.setEventHandler { [weak self] in MainActor.assumeIsolated { self?.emulatorExited() } }
+        watch.resume()
+        exitWatch = watch
+        // The process may have gone before the watch started.
+        if kill(running.pid, 0) != 0 && errno == ESRCH { emulatorExited() }
+        Log.info("attached to \(avd.id) (pid \(running.pid)) on gRPC port \(grpcPort)")
+        startClipboardAndControls(client: client, choosesAudio: false, usesMicrophone: false)
+        waitForBoot(client: client)
+    }
+
+    private func startEmulator(coldBoot: Bool, extraArguments: [String]) throws {
+        let client = try makeClient()
 
         // Without a window the emulator's "auto" GPU mode falls back to software rendering (~20 fps), so the
         // host GPU is used unless the AVD asks for software rendering.
@@ -618,7 +670,11 @@ final class DeviceSession {
         try emulator.start(logFile: logFile)
         self.emulator = emulator
         Log.info("launched emulator for \(avd.id) on gRPC port \(grpcPort), log: \(logFile.path)")
+        startClipboardAndControls(client: client, choosesAudio: choosesAudio, usesMicrophone: usesMicrophone)
+        waitForBoot(client: client)
+    }
 
+    private func startClipboardAndControls(client: EmulatorClient, choosesAudio: Bool, usesMicrophone: Bool) {
         let clipboard = ClipboardSync(client: client)
         self.clipboard = clipboard
         let controls = DeviceControls(client: client, avd: avd, clipboardSync: clipboard.isEnabled)
@@ -632,7 +688,10 @@ final class DeviceSession {
             }
         }
         chrome?.controls = controls
+    }
 
+    /// Starts the streams once the gRPC endpoint answers, and marks the device running once it has booted.
+    private func waitForBoot(client: EmulatorClient) {
         tasks.append(Task { [weak self] in
             do {
                 try await client.waitUntilReachable(timeout: .seconds(120)) { booted in
@@ -664,6 +723,8 @@ final class DeviceSession {
 
     private func tearDown() {
         guard state != .stopped else { return }
+        exitWatch?.cancel()
+        exitWatch = nil
         tasks.forEach { $0.cancel() }
         streamTask?.cancel()
         postureTask?.cancel()
@@ -701,8 +762,10 @@ final class DeviceSession {
         if sharedFrames.map({ $0.size < side * side * 4 }) ?? true,
            ProcessInfo.processInfo.environment["EMULATOR_SHELL_GRPC_FRAMES"] != "1" {
             // A larger window needs a larger buffer. The stream being replaced may still be using the old one,
-            // which it keeps alive until it ends, so the new one gets its own file.
-            let url = FileManager.default.temporaryDirectory.appendingPathComponent("emulator-shell-\(avd.id)-\(side).frames")
+            // which it keeps alive until it ends, so the new one gets its own file. Another Emulator Shell showing
+            // the same device has its own too.
+            let pid = ProcessInfo.processInfo.processIdentifier
+            let url = FileManager.default.temporaryDirectory.appendingPathComponent("emulator-shell-\(avd.id)-\(pid)-\(side).frames")
             sharedFrames = try SharedFrameBuffer(url: url, size: side * side * 4)
         }
         Log.info("streaming frames via \(sharedFrames.map { $0.handle } ?? "gRPC messages")")
@@ -744,7 +807,7 @@ final class DeviceSession {
 
     private func perform(_ action: DeviceChrome.Action) {
         switch action {
-        case .close: stop()
+        case .close: close()
         case .minimize: window?.miniaturize(nil)
         case .screenshot: takeScreenshot()
         case .rotateLeft: rotate(by: 1)
@@ -1225,7 +1288,7 @@ final class DeviceSession {
         alert.messageText = "“\(avd.name)”出错了"
         alert.informativeText = "\(error)"
         alert.runModal()
-        stop()
+        close()
     }
 }
 

@@ -321,6 +321,11 @@ struct RunningEmulator: Hashable {
     let avdId: String
     let serialPort: Int?
     let grpcPort: Int?
+    /// Set when the emulator runs with `-grpc-use-token`.
+    let grpcToken: String?
+    /// Set when it runs with `-grpc-use-jwt` (newer Android Studio): calls then need a token signed with a
+    /// key registered in that folder, which this app does not do.
+    let usesJwt: Bool
 
     var serial: String? { serialPort.map { "emulator-\($0)" } }
 
@@ -335,7 +340,8 @@ struct RunningEmulator: Hashable {
                   let avdId = info["avd.id"]
             else { continue }
             found[avdId] = RunningEmulator(pid: pid, avdId: avdId, serialPort: info["port.serial"].flatMap(Int.init),
-                                           grpcPort: info["grpc.port"].flatMap(Int.init))
+                                           grpcPort: info["grpc.port"].flatMap(Int.init), grpcToken: info["grpc.token"],
+                                           usesJwt: info["grpc.jwks"] != nil)
         }
         return found
     }

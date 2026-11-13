@@ -17,6 +17,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         NSApp.mainMenu = makeMainMenu()
+        manager.listenForShowRequests()
         guard let launchAvd else {
             showManager()
             checkForwarder()
@@ -26,7 +27,17 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
             fail("没有名为 \(launchAvd) 的 AVD。")
             return
         }
-        manager.start(avd, extraArguments: EmulatorForwarder.forwardable(emulatorArguments))
+        // A device another program already runs is shown instead of started a second time; one another
+        // Emulator Shell shows is left to it, its window brought forward.
+        if case .external = manager.status(of: avd), manager.isInOtherEmulatorShell(avd) {
+            manager.showInOwner(avd)
+            NSApp.terminate(nil)
+            return
+        } else if case .external = manager.status(of: avd) {
+            manager.attach(avd)
+        } else {
+            manager.start(avd, extraArguments: EmulatorForwarder.forwardable(emulatorArguments))
+        }
         if let message = manager.errorMessage { fail(message) }
     }
 
@@ -246,9 +257,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
     }
 
     /// Closing a device window shuts the device down (saving its snapshot); there is nothing to show without it.
+    /// A device another program started only loses this window.
     @objc private func closeFrontWindow() {
         if let session = currentSession {
-            session.stop()
+            session.close()
         } else {
             NSApp.keyWindow?.performClose(nil)
         }

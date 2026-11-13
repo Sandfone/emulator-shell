@@ -291,7 +291,20 @@ private struct AvdDetail: View {
         case .running:
             Button { manager.stop(avd) } label: { Label("停止", systemImage: "stop.fill") }
             Button("显示窗口") { manager.showWindow(of: avd) }
+        case .external where manager.isInOtherEmulatorShell(avd):
+            Button { manager.stop(avd) } label: { Label("停止", systemImage: "stop.fill") }
+            Button("显示窗口") { manager.showInOwner(avd) }
+                .help("切换到显示这台设备的另一个 Emulator Shell")
         case .external:
+            let problem = manager.attachProblem(avd)
+            Button { manager.attach(avd) } label: { Label("在本 App 中显示", systemImage: "macwindow") }
+                .buttonStyle(.borderedProminent)
+                .disabled(problem != nil)
+                .help(problem ?? "用本 App 的窗口显示和操作这台设备；关掉窗口设备继续运行")
+            if let owner = manager.owner(of: avd) {
+                Button("切换到 \(owner.localizedName ?? "启动它的程序")") { manager.showInOwner(avd) }
+                    .help("把启动这台设备的程序切换到前台")
+            }
             Button { manager.stop(avd) } label: { Label("停止", systemImage: "stop.fill") }
         }
     }
@@ -304,7 +317,9 @@ private struct AvdDetail: View {
         case .booting: "正在启动…"
         case .stopping: "正在停止，正在保存快照…"
         case let .running(serial): "运行中" + (serial.map { " · \($0)" } ?? "")
-        case let .external(serial): "在其他程序中运行" + (serial.map { " · \($0)" } ?? "")
+        case let .external(serial):
+            (manager.isInOtherEmulatorShell(avd) ? "在另一个 Emulator Shell 中运行" : "在其他程序中运行")
+                + (serial.map { " · \($0)" } ?? "")
         }
     }
 

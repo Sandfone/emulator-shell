@@ -79,6 +79,8 @@ final class DeviceManager {
 
     private(set) var sessionStates: [String: DeviceSession.State] = [:]
     private var external: [String: RunningEmulator] = [:]
+    /// The app each external emulator was started from, by emulator pid; `nil` once looked for and none found.
+    @ObservationIgnored private var owners: [Int32: NSRunningApplication?] = [:]
     @ObservationIgnored private var sessions: [String: DeviceSession] = [:]
     /// Devices being restarted, with the arguments they start again with once stopped.
     @ObservationIgnored private var restarting: [String: [String]] = [:]
@@ -151,6 +153,8 @@ final class DeviceManager {
     private func refreshRunning() {
         let found = RunningEmulator.scan()
         if found != external { external = found }
+        let pids = Set(found.values.map(\.pid))
+        owners = owners.filter { pids.contains($0.key) }
     }
 
     private func measureSizes() {
@@ -213,21 +217,7 @@ final class DeviceManager {
         do {
             let session = try DeviceSession(avd: avd, grpcPort: freeGrpcPort(), coldBoot: coldBoot,
                                             extraArguments: extraArguments, cascade: sessions.count)
-            sessions[avd.id] = session
-            sessionStates[avd.id] = session.state
-            session.onStateChange = { [weak self] state in
-                guard let self else { return }
-                self.sessionStates[avd.id] = state
-                if state == .stopped {
-                    self.sessions[avd.id] = nil
-                    self.sessionStates[avd.id] = nil
-                    self.refreshRunning()
-                    self.measureSizes()
-                    if let arguments = self.restarting.removeValue(forKey: avd.id) {
-                        self.start(self.avds.first { $0.id == avd.id } ?? avd, extraArguments: arguments)
-                    }
-                }
-            }
+            register(session)
             session.onRestart = { [weak self, weak session] in
                 guard let self, let session else { return }
                 self.restarting[avd.id] = extraArguments
@@ -236,6 +226,122 @@ final class DeviceManager {
             note = notes.isEmpty ? nil : notes.joined(separator: "\n")
         } catch {
             errorMessage = "无法启动“\(avd.name)”：\(error.localizedDescription)"
+        }
+    }
+
+    /// Follows a session's state until it stops, then starts it again if it is restarting.
+    private func register(_ session: DeviceSession) {
+        let avd = session.avd
+        sessions[avd.id] = session
+        sessionStates[avd.id] = session.state
+        session.onStateChange = { [weak self] state in
+            guard let self else { return }
+            self.sessionStates[avd.id] = state
+            if state == .stopped {
+                self.sessions[avd.id] = nil
+                self.sessionStates[avd.id] = nil
+                self.refreshRunning()
+                self.measureSizes()
+                if let arguments = self.restarting.removeValue(forKey: avd.id) {
+                    self.start(self.avds.first { $0.id == avd.id } ?? avd, extraArguments: arguments)
+                }
+            }
+        }
+    }
+
+    /// Why a device another program runs cannot be shown in this app; nil if it can.
+    func attachProblem(_ avd: Avd) -> String? {
+        guard let running = external[avd.id] else { return nil }
+        if running.grpcPort == nil { return "它启动时没有开启 gRPC，本 App 连不上。" }
+        if running.usesJwt && running.grpcToken == nil {
+            return "它用 JWT 校验 gRPC 访问（新版 Android Studio 的做法），本 App 还不支持。"
+        }
+        return nil
+    }
+
+    /// Shows a device another program runs in a window of this app, over its gRPC port. Closing the window
+    /// leaves the device running.
+    func attach(_ avd: Avd) {
+        guard case .external = status(of: avd), let running = external[avd.id] else { return }
+        // Another Emulator Shell already shows it in a window like this one: a second would only repeat it.
+        if isInOtherEmulatorShell(avd) {
+            showInOwner(avd)
+            return
+        }
+        if let problem = attachProblem(avd) {
+            errorMessage = "无法在本 App 中显示“\(avd.name)”：\(problem)"
+            return
+        }
+        if avd.config["hw.keyboard"] != "yes" {
+            note = "这台设备没开键盘输入（hw.keyboard），按键和文字输入到不了它；由本 App 启动时会自动开启。"
+        }
+        do {
+            register(try DeviceSession(avd: avd, attachingTo: running, cascade: sessions.count))
+        } catch {
+            errorMessage = "无法在本 App 中显示“\(avd.name)”：\(error.localizedDescription)"
+        }
+    }
+
+    /// The app a device another program runs was started from: the nearest of the emulator process and its
+    /// ancestors that is an app with windows (Android Studio, Terminal, another Emulator Shell, or the
+    /// emulator itself when it has its own window).
+    func owner(of avd: Avd) -> NSRunningApplication? {
+        guard let running = external[avd.id] else { return nil }
+        if let known = owners[running.pid] { return known }
+        var pid = running.pid
+        var found: NSRunningApplication?
+        while pid > 1 {
+            if let app = NSRunningApplication(processIdentifier: pid), app.activationPolicy == .regular {
+                found = app == .current ? nil : app
+                break
+            }
+            guard let parent = Self.parent(of: pid) else { break }
+            pid = parent
+        }
+        owners[running.pid] = .some(found)
+        return found
+    }
+
+    private static func parent(of pid: Int32) -> Int32? {
+        var info = kinfo_proc()
+        var size = MemoryLayout<kinfo_proc>.stride
+        var mib = [CTL_KERN, KERN_PROC, KERN_PROC_PID, pid]
+        guard sysctl(&mib, 4, &info, &size, nil, 0) == 0, size > 0 else { return nil }
+        return info.kp_eproc.e_ppid
+    }
+
+    /// Brings forward the app a device another program runs was started from; another Emulator Shell is
+    /// also asked to bring that device's window forward.
+    func showInOwner(_ avd: Avd) {
+        guard let app = owner(of: avd) else { return }
+        if Self.isEmulatorShell(app) {
+            DistributedNotificationCenter.default().postNotificationName(
+                Self.showDeviceNotification, object: avd.id,
+                userInfo: ["pid": Int(app.processIdentifier)], deliverImmediately: true)
+        }
+        app.activate()
+    }
+
+    /// Whether a device another program runs was started, and is shown, by another copy of this app.
+    func isInOtherEmulatorShell(_ avd: Avd) -> Bool {
+        owner(of: avd).map(Self.isEmulatorShell) ?? false
+    }
+
+    /// Whether `app` is another copy of this app, also when run through the `emulator-shell` link.
+    static func isEmulatorShell(_ app: NSRunningApplication) -> Bool {
+        app.bundleIdentifier == "EmulatorShell"
+            || app.executableURL?.resolvingSymlinksInPath().lastPathComponent == "EmulatorShell"
+    }
+
+    /// Posted by one Emulator Shell to another, with the AVD id as object and the receiver's pid in userInfo.
+    static let showDeviceNotification = Notification.Name("EmulatorShell.showDevice")
+
+    /// Brings forward this app's window of a device when another Emulator Shell asks.
+    func listenForShowRequests() {
+        DistributedNotificationCenter.default().addObserver(forName: Self.showDeviceNotification, object: nil, queue: .main) { [weak self] note in
+            guard let avdId = note.object as? String,
+                  note.userInfo?["pid"] as? Int == Int(ProcessInfo.processInfo.processIdentifier) else { return }
+            MainActor.assumeIsolated { self?.sessions[avdId]?.bringToFront() }
         }
     }
 
