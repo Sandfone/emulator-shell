@@ -752,6 +752,24 @@ sealed partial class ManagerWindow : Window
         }
     }
 
+    /// What a device window's menu asked for, once the window can show dialogs.
+    public void Run(ManagerTask task)
+    {
+        if (task == ManagerTask.Show) return;
+        if (Content.XamlRoot == null)
+        {
+            var content = (FrameworkElement)Content;
+            void Loaded(object sender, RoutedEventArgs e)
+            {
+                content.Loaded -= Loaded;
+                Run(task);
+            }
+            content.Loaded += Loaded;
+            return;
+        }
+        _ = task == ManagerTask.ToggleForwarder ? ToggleForwarder() : ToggleCommand();
+    }
+
     /// On opening the manager: an SDK update replaces the forwarder with a new emulator, and a rebuilt or moved
     /// app leaves it pointing at a stale path.
     public async void CheckForwarder()

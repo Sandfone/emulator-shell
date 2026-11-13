@@ -53,6 +53,10 @@ static partial class Native
     public static partial short GetKeyState(int key);
 
     [LibraryImport("user32.dll")]
+    public static partial int GetSystemMetrics(int index);
+    public const int SM_SWAPBUTTON = 23;
+
+    [LibraryImport("user32.dll")]
     public static partial nint GetForegroundWindow();
 
     [LibraryImport("user32.dll")]
@@ -194,6 +198,8 @@ static partial class Native
     }
 
     public static bool IsLeftButtonDown => (GetAsyncKeyState(0x01) & 0x8000) != 0;
+    /// The button that clicks: GetAsyncKeyState reads the physical buttons, which a left-handed setup swaps.
+    public static bool IsPrimaryButtonDown => (GetAsyncKeyState(GetSystemMetrics(SM_SWAPBUTTON) != 0 ? 0x02 : 0x01) & 0x8000) != 0;
 
     public static Windows.Graphics.PointInt32 CursorPosition =>
         GetCursorPos(out var point) ? new Windows.Graphics.PointInt32(point.X, point.Y) : default;

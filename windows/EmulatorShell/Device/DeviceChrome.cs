@@ -30,6 +30,8 @@ sealed class DeviceChrome
     public event Action? ShapeChanged;
     /// What the "More" flyout shows and changes; set once the device's gRPC client exists.
     public DeviceControls? Controls { get; set; }
+    /// The window's menu, built each time the title bar's menu button opens it.
+    public Func<MenuFlyout>? MenuProvider { get; set; }
 
     public const double BarHeight = 44;
     public const double Gap = 12;
@@ -50,10 +52,13 @@ sealed class DeviceChrome
     private readonly StackPanel navStack;
     private readonly TextBlock bootLabel = new() { Text = "正在启动…", FontSize = 12, Opacity = 0.65, HorizontalAlignment = HorizontalAlignment.Center, VerticalAlignment = VerticalAlignment.Center };
     private readonly ToolbarButton moreButton;
+    /// At the title bar's leading edge: the window's menu, as a right click opens it.
+    private readonly ToolbarButton menuButton;
     /// A foldable's postures, open, closed and half open, the one it is in marked.
     private readonly Border? rail;
     private readonly List<(PostureValue Posture, ToolbarButton Button)> postureButtons = [];
-    private Flyout? flyout;
+    /// The menu or the "More" panel, whichever is open: the title bar stays while it is.
+    private FlyoutBase? flyout;
     private Border? toast;
     private readonly DispatcherQueueTimerHolder toastTimer, hudTimer, showTimer, hideTimer, pointerTimer;
     private bool titleVisible;
@@ -83,7 +88,10 @@ sealed class DeviceChrome
         // Title bar
         var name = new TextBlock { Text = deviceName, FontSize = 13, FontWeight = FontWeights.SemiBold, TextTrimming = TextTrimming.CharacterEllipsis };
         var detail = new TextBlock { Text = subtitle, FontSize = 11, Opacity = 0.65, TextTrimming = TextTrimming.CharacterEllipsis };
-        titleLabels = new StackPanel { Spacing = 1, VerticalAlignment = VerticalAlignment.Center, Margin = new Thickness(14, 0, 8, 0), Children = { name, detail } };
+        titleLabels = new StackPanel { Spacing = 1, VerticalAlignment = VerticalAlignment.Center, Margin = new Thickness(4, 0, 8, 0), Children = { name, detail } };
+        // Enabled while the device boots too: the manager and quitting do not need it.
+        menuButton = new ToolbarButton("", "菜单", null) { Margin = new Thickness(6, 0, 0, 0), VerticalAlignment = VerticalAlignment.Center };
+        menuButton.Pressed += pressed => { if (pressed) ToggleMenu(); };
 
         var screenshot = ActionButton("", "截图", "Ctrl+S", DeviceAction.Screenshot);
         List<ToolbarButton> rotate = [ActionButton("", "向左旋转", "Ctrl+←", DeviceAction.RotateLeft, mirrored: true),
@@ -114,11 +122,13 @@ sealed class DeviceChrome
             Orientation = Orientation.Horizontal, Spacing = 2, VerticalAlignment = VerticalAlignment.Center, Margin = new Thickness(8, 0, 6, 0),
             Children = { new Border { Width = 1, Height = 18, Margin = new Thickness(0, 0, 6, 0), Background = Stroke }, minimize, close },
         };
-        var titleGrid = new Grid { ColumnDefinitions = { new() { Width = new GridLength(1, GridUnitType.Star) }, new() { Width = GridLength.Auto }, new() { Width = GridLength.Auto } } };
+        var titleGrid = new Grid { ColumnDefinitions = { new() { Width = GridLength.Auto }, new() { Width = new GridLength(1, GridUnitType.Star) }, new() { Width = GridLength.Auto }, new() { Width = GridLength.Auto } } };
+        titleGrid.Children.Add(menuButton);
+        Grid.SetColumn(titleLabels, 1);
         titleGrid.Children.Add(titleLabels);
-        Grid.SetColumn(buttons, 1);
+        Grid.SetColumn(buttons, 2);
         titleGrid.Children.Add(buttons);
-        Grid.SetColumn(windowButtons, 2);
+        Grid.SetColumn(windowButtons, 3);
         titleGrid.Children.Add(windowButtons);
         titleBar = Glass(14, titleGrid);
         titleBar.RenderTransform = titleShift;
@@ -167,15 +177,26 @@ sealed class DeviceChrome
 
     private static Brush Stroke => (Brush)Application.Current.Resources["SurfaceStrokeColorDefaultBrush"];
 
-    /// A rounded surface over the desktop for the bars.
-    private static Border Glass(double radius, UIElement child) => new()
+    /// A rounded surface over the desktop for the bars. Dragging it, anywhere but on a button, moves the window,
+    /// as on macOS; the buttons handle their own presses, so those do not reach it.
+    private Border Glass(double radius, UIElement child)
     {
-        CornerRadius = new CornerRadius(radius),
-        Background = (Brush)Application.Current.Resources["AcrylicInAppFillColorDefaultBrush"],
-        BorderBrush = (Brush)Application.Current.Resources["SurfaceStrokeColorFlyoutBrush"],
-        BorderThickness = new Thickness(1),
-        Child = child,
-    };
+        var glass = new Border
+        {
+            CornerRadius = new CornerRadius(radius),
+            Background = (Brush)Application.Current.Resources["AcrylicInAppFillColorDefaultBrush"],
+            BorderBrush = (Brush)Application.Current.Resources["SurfaceStrokeColorFlyoutBrush"],
+            BorderThickness = new Thickness(1),
+            Child = child,
+        };
+        glass.PointerPressed += (_, e) =>
+        {
+            if (!e.GetCurrentPoint(glass).Properties.IsLeftButtonPressed) return;
+            e.Handled = true;
+            window.Drag();
+        };
+        return glass;
+    }
 
     /// Stops the timers and closes the flyout; the chrome is unusable afterwards.
     public void Close()
@@ -320,7 +341,7 @@ sealed class DeviceChrome
 
     /// The bar is as wide as the device, so on a small one what does not fit is left out: first the name,
     /// then the volume keys and power (also on the frame's side buttons and in the context menu), then the
-    /// rotate buttons, then fold, then screenshot. The window buttons and "More" always stay.
+    /// rotate buttons, then fold, then screenshot. The menu, the window buttons and "More" always stay.
     private void FitTitleBar(double width)
     {
         var hidden = new List<ToolbarButton>();
@@ -328,7 +349,7 @@ sealed class DeviceChrome
         double Needed()
         {
             var count = titleButtons.Count - hidden.Count;
-            return (showsLabels ? 14 + 50 + 8 : 6) + count * 32 + (count - 1) * 2 + 8 + 7 + 2 * 32 + 2 + 6 + 2;
+            return 6 + 32 + (showsLabels ? 4 + 50 + 8 : 2) + count * 32 + (count - 1) * 2 + 8 + 7 + 2 * 32 + 2 + 6 + 2;
         }
         if (Needed() > width) showsLabels = false;
         foreach (var group in droppableButtons)
@@ -446,29 +467,56 @@ sealed class DeviceChrome
 
     public void OpenMoreForTest() => ToggleMore();
 
+    public void OpenMenuForTest() => ToggleMenu();
+
+    private void ToggleMenu()
+    {
+        if (flyout?.IsOpen == true)
+        {
+            var wasMenu = flyout is MenuFlyout;
+            flyout.Hide();
+            if (wasMenu) return;
+        }
+        if (MenuProvider == null) return;
+        var menu = MenuProvider();
+        menu.Placement = FlyoutPlacementMode.BottomEdgeAlignedLeft;
+        menu.ShouldConstrainToRootBounds = false;
+        menu.Closed += (_, _) =>
+        {
+            menuButton.IsOn = false;
+            if (flyout == menu) flyout = null;
+            PointerMoved();
+        };
+        flyout = menu;
+        menuButton.IsOn = true;
+        menu.ShowAt(menuButton);
+    }
+
     private void ToggleMore()
     {
         if (flyout?.IsOpen == true)
         {
+            var wasMore = flyout is Flyout;
             flyout.Hide();
-            return;
+            if (wasMore) return;
         }
         if (Controls == null) return;
-        flyout = new Flyout
+        var more = new Flyout
         {
             Content = new MorePanel(Controls),
             Placement = FlyoutPlacementMode.BottomEdgeAlignedRight,
             // A popup window of its own, so it may reach past the device window's edges.
             ShouldConstrainToRootBounds = false,
         };
-        flyout.Closed += (_, _) =>
+        more.Closed += (_, _) =>
         {
             moreButton.IsOn = false;
-            flyout = null;
+            if (flyout == more) flyout = null;
             PointerMoved();
         };
+        flyout = more;
         moreButton.IsOn = true;
-        flyout.ShowAt(moreButton);
+        more.ShowAt(moreButton);
     }
 }
 

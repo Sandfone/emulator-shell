@@ -67,8 +67,8 @@ sealed partial class DeviceSession
         }
     }
     public event Action<SessionState>? StateChanged;
-    /// Ctrl+Shift+2 in a device window, which opens the device manager.
-    public event Action? ManagerRequested;
+    /// Ctrl+Shift+2 or the menu, which open the device manager, or the menu's forwarder and command-line items.
+    public event Action<ManagerTask>? ManagerRequested;
     /// Ctrl+Q in a device window, which quits the app.
     public event Action? QuitRequested;
     public DeviceWindow? Window { get; private set; }
@@ -320,6 +320,7 @@ sealed partial class DeviceSession
         var chrome = new DeviceChrome(window, Avd.Name, Subtitle(skin), closedSkin != null);
         chrome.Key += SendKey;
         chrome.Action += Perform;
+        chrome.MenuProvider = MakeMenu;
         chrome.Posture += posture => Enqueue(async c =>
         {
             try { await c.SetPosture(posture); } catch (Exception error) { Log.Error($"setPosture failed: {error.Message}"); }
@@ -348,7 +349,7 @@ sealed partial class DeviceSession
         view.ContextRequested += (_, e) =>
         {
             e.Handled = true;
-            var menu = MakeContextMenu();
+            var menu = MakeMenu();
             if (e.TryGetPosition(view, out var point)) menu.ShowAt(view, point);
             else menu.ShowAt(view);
         };
@@ -372,35 +373,50 @@ sealed partial class DeviceSession
         return folder == null ? resolution : $"API {folder["android-".Length..]} · {resolution}";
     }
 
-    private MenuFlyout MakeContextMenu()
+    /// The window's menu, which the title bar's menu button and a right click both open: what macOS keeps in its
+    /// menu bar (the app's, Device and Window menus), the device's commands and sizes a level down.
+    private MenuFlyout MakeMenu()
     {
         var menu = new MenuFlyout();
+        MenuFlyoutItem Item(string text, string? shortcut, Action click, bool enabled = true)
+        {
+            var item = new MenuFlyoutItem { Text = text, KeyboardAcceleratorTextOverride = shortcut ?? "", IsEnabled = enabled };
+            item.Click += (_, _) => click();
+            return item;
+        }
+
+        menu.Items.Add(Item("模拟器管理器", "Ctrl+Shift+2", () => ManagerRequested?.Invoke(ManagerTask.Show)));
+        menu.Items.Add(new MenuFlyoutSeparator());
+
         var running = State == SessionState.Running;
+        var device = new MenuFlyoutSubItem { Text = "设备" };
         foreach (var group in DeviceCommand.MenuGroups)
         {
-            if (menu.Items.Count > 0) menu.Items.Add(new MenuFlyoutSeparator());
+            if (device.Items.Count > 0) device.Items.Add(new MenuFlyoutSeparator());
             foreach (var (title, command, shortcut) in group.Where(g => IsAvailable(g.Command)))
-            {
-                var item = new MenuFlyoutItem { Text = title, KeyboardAcceleratorTextOverride = shortcut, IsEnabled = running };
-                item.Click += (_, _) => Run(command);
-                menu.Items.Add(item);
-            }
+                device.Items.Add(Item(title, shortcut, () => Run(command), running));
         }
-        menu.Items.Add(new MenuFlyoutSeparator());
+        menu.Items.Add(device);
         var sizes = new MenuFlyoutSubItem { Text = "窗口大小" };
-        foreach (var (title, zoom, shortcut) in ZoomItems)
-        {
-            var item = new MenuFlyoutItem { Text = title, KeyboardAcceleratorTextOverride = shortcut, IsEnabled = CanZoom(zoom) };
-            item.Click += (_, _) => Zoom(zoom);
-            sizes.Items.Add(item);
-        }
+        foreach (var (title, zoom, shortcut) in ZoomItems) sizes.Items.Add(Item(title, shortcut, () => Zoom(zoom), CanZoom(zoom)));
         menu.Items.Add(sizes);
-        var manager = new MenuFlyoutItem { Text = "模拟器管理器", KeyboardAcceleratorTextOverride = "Ctrl+Shift+2" };
-        manager.Click += (_, _) => ManagerRequested?.Invoke();
-        menu.Items.Add(manager);
-        var close = new MenuFlyoutItem { Text = "关闭", KeyboardAcceleratorTextOverride = "Ctrl+W" };
-        close.Click += (_, _) => Close();
-        menu.Items.Add(close);
+        menu.Items.Add(new MenuFlyoutSeparator());
+
+        var forwarder = new ToggleMenuFlyoutItem
+        {
+            Text = "让 Android Studio 等工具使用 Emulator Shell",
+            IsChecked = EmulatorForwarder.State == EmulatorForwarder.ForwarderState.Installed,
+            IsEnabled = EmulatorForwarder.IsAvailable,
+        };
+        forwarder.Click += (_, _) => ManagerRequested?.Invoke(ManagerTask.ToggleForwarder);
+        menu.Items.Add(forwarder);
+        menu.Items.Add(Item(EmulatorForwarder.IsCommandInstalled ? "移除命令行工具 emulator-shell" : "安装命令行工具 emulator-shell", null,
+                            () => ManagerRequested?.Invoke(ManagerTask.ToggleCommand)));
+        menu.Items.Add(new MenuFlyoutSeparator());
+
+        menu.Items.Add(Item("最小化", "Ctrl+M", () => Window?.Minimize()));
+        menu.Items.Add(Item("关闭", "Ctrl+W", Close));
+        menu.Items.Add(Item("退出 Emulator Shell", "Ctrl+Q", () => QuitRequested?.Invoke()));
         return menu;
     }
 
@@ -468,7 +484,7 @@ sealed partial class DeviceSession
                 break;
             case (VirtualKey.Number2, true, false):
                 e.Handled = true;
-                ManagerRequested?.Invoke();
+                ManagerRequested?.Invoke(ManagerTask.Show);
                 break;
             case (VirtualKey.Q, false, false):
                 e.Handled = true;

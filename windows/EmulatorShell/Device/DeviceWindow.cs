@@ -312,19 +312,45 @@ sealed partial class DeviceWindow : Window
     private bool dragging;
     private bool reachedTop;
 
-    /// Moves the window with the pointer until the button comes up, then brings any part dragged off the screen back.
+    private PixelRect dragFrom;
+    private Windows.Graphics.PointInt32 dragAnchor;
+
+    /// Moves the window with the pointer until the button comes up, then brings any part dragged off the screen
+    /// back. Called from a press on the device's shell or on a bar.
+    ///
+    /// The window follows the pointer on every frame rather than through the system's move loop
+    /// (WM_NCLBUTTONDOWN on the caption): started from a XAML press, that loop moved the window by amounts
+    /// unrelated to the pointer's.
     public void Drag()
     {
-        if (holds.Count > 0 || dragging) return;
-        var before = Box;
+        if (holds.Count > 0 || dragging || !Native.IsPrimaryButtonDown) return;
         dragging = true;
         reachedTop = false;
-        // The system's own move loop, as a title bar starts it; it returns once the button is released.
-        Native.ReleaseCapture();
-        Native.SendMessage(Hwnd, Native.WM_NCLBUTTONDOWN, Native.HTCAPTION, 0);
+        dragFrom = Box;
+        dragAnchor = Native.CursorPosition;
+        CompositionTarget.Rendering += StepDrag;
+    }
+
+    private void StepDrag(object? sender, object? e)
+    {
+        var pointer = Native.CursorPosition;
+        var box = dragFrom.Offset(pointer.X - dragAnchor.X, pointer.Y - dragAnchor.Y);
+        if (box != Box)
+        {
+            Box = box;
+            UpdateFrame();
+            if (!reachedTop && AtScreenTop)
+            {
+                reachedTop = true;
+                ScreenTopReached?.Invoke(true);
+            }
+        }
+        if (Native.IsPrimaryButtonDown) return;
+
+        CompositionTarget.Rendering -= StepDrag;
         dragging = false;
         if (reachedTop) ScreenTopReached?.Invoke(false);
-        if (Box == before) return;
+        if (Box == dragFrom) return;
         var fitted = Fitted(Box, Screen);
         if (fitted != Box) SetBox(fitted, TimeSpan.FromSeconds(0.2));
         Moved?.Invoke();

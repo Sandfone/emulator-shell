@@ -365,10 +365,20 @@ without it `dotnet publish` leaves out the app's `.pri`, and the manager fails t
   a still picture of it. Window positions and sizes are in screen pixels, scaled per monitor.
 - **Keyboard**: the macOS menu shortcuts use Ctrl for ⌘: Ctrl+B Back, Ctrl+Shift+H Home, Ctrl+Shift+O
   Overview, Ctrl+L Power, Ctrl+Alt+↑/↓ volume, Ctrl+S screenshot, Ctrl+←/→ rotate, Ctrl+Shift+F fold, Ctrl+1/2/3
-  sizes, Ctrl+=/Ctrl+− zoom, Ctrl+W close, Ctrl+M minimize, Ctrl+Shift+2 manager, Ctrl+Q quit. There is no menu
-  bar: the device window's context menu has the device commands and the window sizes, and the manager's ⋯ button
-  the forwarder, the command-line tool and Quit. The window's minimize and close buttons sit at the trailing end
-  of the title bar.
+  sizes, Ctrl+=/Ctrl+− zoom, Ctrl+W close, Ctrl+M minimize, Ctrl+Shift+2 manager, Ctrl+Q quit. The window's
+  minimize and close buttons sit at the trailing end of the title bar.
+- **Menus**: there is no menu bar. Its menus are in the menu button (≡) at the leading end of the device's title
+  bar, which a right click on the device also opens: 模拟器管理器, the 设备 and 窗口大小 submenus, the forwarder
+  and the command-line tool, minimize, close and quit. The manager's ⋯ button has the forwarder, the
+  command-line tool and Quit.
+- **Notification area and jump list**: the app's icon in the notification area opens the manager on a click; its
+  menu lists every AVD with its state (choosing one shows, starts or attaches it) and quits. Right-clicking the
+  taskbar button lists 模拟器管理器 and every AVD. Each device the SDK forwarder starts runs in a copy of its own,
+  so one copy, the first to take a named mutex (`EmulatorShell.Primary.<hash of the app folder>`), shows the icon
+  and keeps the jump list; the next takes over when it quits. A launch without an AVD (the Start menu, the jump
+  list, `emulator-shell`) asks that copy, over a named pipe, to show its manager instead of opening another.
+- **Dragging** the frame or a bar moves the window with the pointer on every frame. The system's move loop
+  (`WM_NCLBUTTONDOWN` on the caption), started from a XAML press, moved it by amounts unrelated to the pointer's.
 - **Files**: settings in `%LOCALAPPDATA%\EmulatorShell\settings.json`; emulator output in
   `%LOCALAPPDATA%\EmulatorShell\Logs\emulator-<avd>.log`; running emulators are found through
   `%TEMP%\avd\running\pid_*.ini`. System images listed are the host's ABI (`x86_64`, or `arm64-v8a` on ARM).

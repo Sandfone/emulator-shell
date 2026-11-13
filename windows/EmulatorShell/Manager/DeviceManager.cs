@@ -30,6 +30,10 @@ sealed record AvdForm
 
 enum AvdStatusKind { Stopped, Booting, Stopping, Running, External }
 
+/// What a device window's menu asks of the manager window: to show it, or to show it and turn the SDK forwarder
+/// or the command-line tool on or off, which it asks about in its own dialogs.
+enum ManagerTask { Show, ToggleForwarder, ToggleCommand }
+
 /// `External`: started by something else (Android Studio, the command line).
 sealed record AvdStatus(AvdStatusKind Kind, string? Serial = null)
 {
@@ -60,7 +64,7 @@ sealed class DeviceManager
     /// A device session ended or was added.
     public event Action? SessionsChanged;
     /// A device window asked for the manager (Ctrl+Shift+2) or to quit (Ctrl+Q).
-    public event Action? ManagerRequested;
+    public event Action<ManagerTask>? ManagerRequested;
     public event Action? QuitRequested;
 
     private readonly Dictionary<string, SessionState> sessionStates = [];
@@ -271,7 +275,7 @@ sealed class DeviceManager
             }
             Notify();
         };
-        session.ManagerRequested += () => ManagerRequested?.Invoke();
+        session.ManagerRequested += task => ManagerRequested?.Invoke(task);
         session.QuitRequested += () => QuitRequested?.Invoke();
         SessionsChanged?.Invoke();
     }

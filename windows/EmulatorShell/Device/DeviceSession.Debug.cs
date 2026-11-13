@@ -10,7 +10,7 @@ namespace EmulatorShell;
 /// `title on|off`,
 /// `resize <corner 0-3> <dx> <dy>` (pixels, in 10 steps), `key <W3C name>`, `text <text>`, `touch <x> <y>`,
 /// `swipe <x1> <y1> <x2> <y2>` (device pixels),
-/// `screenshot`, `more`, `move <dx> <dy>`, `shot <name>` (a marker for a screen capture), `quit`.
+/// `screenshot`, `more`, `menu`, `move <dx> <dy>`, `shot <name>` (a marker for a screen capture), `quit`.
 sealed partial class DeviceSession
 {
     partial void RunTestScript()
@@ -71,6 +71,7 @@ sealed partial class DeviceSession
                     }
                     case "screenshot": Perform(DeviceAction.Screenshot); break;
                     case "more": chrome?.OpenMoreForTest(); break;
+                    case "menu": chrome?.OpenMenuForTest(); break;
                     case "move":
                     {
                         var d = argument.Split(' ').Select(double.Parse).ToArray();
