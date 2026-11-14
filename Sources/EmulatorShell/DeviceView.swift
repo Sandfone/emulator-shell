@@ -11,6 +11,16 @@ final class DeviceView: NSView {
     /// The mouse went down on the screen, before that press becomes a touch.
     var onScreenPress: (() -> Void)?
     var contextMenuProvider: (() -> NSMenu)?
+    /// Scrolling over the screen, at a device pixel, by the event's deltas; unset, scrolling passes on.
+    var onScroll: ((_ devicePoint: CGPoint, _ dx: CGFloat, _ dy: CGFloat, _ precise: Bool) -> Void)?
+    /// Edit › Paste (⌘V) while the device has keyboard focus; unset, the menu item stays disabled.
+    var onPaste: (() -> Void)?
+    /// Files dropped on the device; set, the view accepts file drags.
+    var onDropFiles: (([URL]) -> Void)? {
+        didSet {
+            if onDropFiles == nil { unregisterDraggedTypes() } else { registerForDraggedTypes([.fileURL]) }
+        }
+    }
 
     private var skin: DeviceSkin
     /// `DeviceSkin.cornerInsets()`, measured once per skin.
@@ -538,6 +548,36 @@ final class DeviceView: NSView {
 
     override func keyDown(with event: NSEvent) {
         onKey?(event)
+    }
+
+    override func scrollWheel(with event: NSEvent) {
+        guard let onScroll, displayRect.contains(localPoint(for: event)) else { return super.scrollWheel(with: event) }
+        onScroll(devicePoint(for: event), event.scrollingDeltaX, event.scrollingDeltaY, event.hasPreciseScrollingDeltas)
+    }
+
+    @objc func paste(_ sender: Any?) {
+        onPaste?()
+    }
+
+    override func draggingEntered(_ sender: NSDraggingInfo) -> NSDragOperation {
+        onDropFiles != nil && !droppedFiles(sender).isEmpty ? .copy : []
+    }
+
+    override func performDragOperation(_ sender: NSDraggingInfo) -> Bool {
+        let urls = droppedFiles(sender)
+        guard let onDropFiles, !urls.isEmpty else { return false }
+        onDropFiles(urls)
+        return true
+    }
+
+    private func droppedFiles(_ sender: NSDraggingInfo) -> [URL] {
+        sender.draggingPasteboard.readObjects(forClasses: [NSURL.self], options: [.urlReadingFileURLsOnly: true]) as? [URL] ?? []
+    }
+}
+
+extension DeviceView: NSMenuItemValidation {
+    func validateMenuItem(_ menuItem: NSMenuItem) -> Bool {
+        menuItem.action == #selector(paste(_:)) ? onPaste != nil : true
     }
 }
 

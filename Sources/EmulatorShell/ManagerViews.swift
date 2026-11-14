@@ -12,12 +12,23 @@ struct ManagerView: View {
         } detail: {
             DetailPane(manager: manager)
         }
-        .navigationTitle("模拟器")
+        .navigationTitle("设备")
         // AVDs and images may have been changed by Android Studio or the command line meanwhile.
         .onReceive(NotificationCenter.default.publisher(for: NSApplication.didBecomeActiveNotification)) { _ in
             manager.reload()
         }
+        .onChange(of: manager.phones.devices) { _, _ in manager.followPhysicalSelection() }
         .toolbar {
+            ToolbarItem(placement: .primaryAction) {
+                Button {
+                    manager.sheet = .pairing
+                } label: {
+                    Label("Wi-Fi 配对", systemImage: "wifi")
+                }
+                .labelStyle(.titleAndIcon)
+                .keyboardShortcut("n", modifiers: [.command, .shift])
+                .help("通过 Wi-Fi 配对 Android 11 及以上的设备  ⇧⌘N")
+            }
             ToolbarItem(placement: .primaryAction) {
                 Button {
                     manager.sheet = .images
@@ -32,6 +43,7 @@ struct ManagerView: View {
             switch sheet {
             case let .form(form): AvdFormSheet(manager: manager, form: form)
             case .images: ImagesSheet(manager: manager)
+            case .pairing: PairingSheet(manager: manager)
             }
         }
         .alert(
@@ -80,8 +92,21 @@ private struct Sidebar: View {
         }
     }
 
+    private var phones: [PhysicalDevice] {
+        let filter = manager.filter.trimmingCharacters(in: .whitespaces)
+        return manager.phones.devices.filter { filter.isEmpty || $0.name.localizedCaseInsensitiveContains(filter) }
+    }
+
     var body: some View {
         List(selection: $manager.selection) {
+            Section("物理设备") {
+                ForEach(phones) { device in
+                    PhysicalRow(manager: manager, device: device, selected: manager.selection == device.id).tag(device.id)
+                }
+                if manager.phones.devices.isEmpty {
+                    ConnectHelpRow().tag(Self.helpTag)
+                }
+            }
             ForEach(sections, id: \.category) { section in
                 Section(section.category.title) {
                     ForEach(section.avds) { avd in
@@ -93,14 +118,18 @@ private struct Sidebar: View {
         .contextMenu(forSelectionType: String.self) { ids in
             if let avd = manager.avds.first(where: { $0.id == ids.first }) {
                 AvdActions(manager: manager, avd: avd, includeStart: true)
+            } else if let device = manager.phones.devices.first(where: { $0.id == ids.first }) {
+                PhysicalActions(manager: manager, device: device, includeMain: true)
             }
         } primaryAction: { ids in
-            if let avd = manager.avds.first(where: { $0.id == ids.first }) {
+            if let device = manager.phones.devices.first(where: { $0.id == ids.first }), device.isOnline {
+                manager.mirror(device)
+            } else if let avd = manager.avds.first(where: { $0.id == ids.first }) {
                 if manager.status(of: avd).isStopped { manager.start(avd) } else { manager.showWindow(of: avd) }
             }
         }
         .overlay {
-            if !manager.filter.isEmpty && sections.isEmpty && !manager.avds.isEmpty {
+            if !manager.filter.isEmpty && sections.isEmpty && phones.isEmpty && !manager.avds.isEmpty {
                 Text("没有名称包含“\(manager.filter)”的模拟器").font(.callout).foregroundStyle(.secondary).padding()
             }
         }
@@ -135,6 +164,11 @@ private struct Sidebar: View {
             }
         }
     }
+}
+
+extension Sidebar {
+    /// The selection of the "connect a device" row shown while no phone is connected.
+    static let helpTag = "device:"
 }
 
 private struct SidebarRow: View {
@@ -192,7 +226,17 @@ private struct DetailPane: View {
     @Bindable var manager: DeviceManager
 
     var body: some View {
-        if manager.avds.isEmpty {
+        content
+            .frame(maxWidth: .infinity, maxHeight: .infinity)
+            .overlay(alignment: .bottomTrailing) { PhysicalToast(phones: manager.phones) }
+            .animation(.easeOut(duration: 0.2), value: manager.phones.toast)
+    }
+
+    @ViewBuilder
+    private var content: some View {
+        if manager.selection?.hasPrefix("device:") == true {
+            PhysicalDetailPane(manager: manager)
+        } else if manager.avds.isEmpty {
             ContentUnavailableView {
                 Label("还没有模拟器", systemImage: "iphone")
             } description: {
@@ -401,7 +445,7 @@ private struct AvdActions: View {
     }
 }
 
-private struct InfoGroup: View {
+struct InfoGroup: View {
     let title: String
     let rows: [(String, String)]
 

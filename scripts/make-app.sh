@@ -17,6 +17,9 @@ rm -rf "$work"
 mkdir -p "$work/Emulator Shell.app/Contents/MacOS" "$work/Emulator Shell.app/Contents/Resources" "$work/AppIcon.iconset"
 bundle="$work/Emulator Shell.app"
 cp "$binary" "$bundle/Contents/MacOS/EmulatorShell"
+# The device side of mirroring physical devices (scrcpy-server, Apache 2.0), with its license.
+cp "$root/vendor/scrcpy/scrcpy-server" "$bundle/Contents/Resources/scrcpy-server"
+cp "$root/vendor/scrcpy/LICENSE" "$bundle/Contents/Resources/scrcpy-LICENSE"
 
 swift scripts/make-icon.swift "$work/icon.png"
 for px in 16 32 128 256 512; do

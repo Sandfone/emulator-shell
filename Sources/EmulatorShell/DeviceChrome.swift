@@ -8,13 +8,15 @@ import SwiftUI
 /// room for them all, so its size is the size of everything it shows.
 @MainActor
 final class DeviceChrome: NSObject, NSPopoverDelegate {
-    enum Action { case close, minimize, screenshot, rotateLeft, rotateRight, toggleFold, posture(PostureValue) }
+    enum Action { case close, minimize, screenshot, record, rotateLeft, rotateRight, toggleFold, posture(PostureValue) }
 
     /// A device key went down (`true`) or up; the key is a W3C key name.
     var onKey: ((_ key: String, _ pressed: Bool) -> Void)?
     var onAction: ((Action) -> Void)?
     /// What the "More" popover shows and changes; set once the device's gRPC client exists.
     var controls: DeviceControls?
+    /// The "More" popover's content for a device without `controls` (a physical one).
+    var panel: (() -> AnyView)?
 
     static let barHeight: CGFloat = 44
     static let gap: CGFloat = 12
@@ -56,23 +58,40 @@ final class DeviceChrome: NSObject, NSPopoverDelegate {
     private var box = CGRect.zero
     private var device = CGRect.zero
     private let foldable: Bool
+    /// A physical device: no rotate buttons (it turns when it is turned), a record button instead.
+    private let physical: Bool
+    private var recordButton: ToolbarButton?
+    /// While recording: when it started, and the badge that shows for how long while the title bar is hidden.
+    private var recordingSince: Date?
+    private let recordBadge = GlassView(cornerRadius: 16)
+    private let recordLabel = NSTextField(labelWithString: "")
+    private var recordTimer: Timer?
+    /// Covers the device with a message, e.g. while a phone is disconnected.
+    private let overlay = NSView()
+    private let overlayLabel = NSTextField(wrappingLabelWithString: "")
     /// The title bar's buttons that may be left out on a narrow device, in the order they go.
     private var droppableButtons: [[ToolbarButton]] = []
 
     /// `foldable` adds the posture rail.
-    init(container: NSView, deviceName: String, subtitle: String, foldable: Bool = false) {
+    init(container: NSView, deviceName: String, subtitle: String, foldable: Bool = false, physical: Bool = false) {
         self.container = container
         self.deviceName = deviceName
         self.foldable = foldable
+        self.physical = physical
         super.init()
+        if physical { bootLabel.stringValue = "正在连接…" }
         buildTitleBar(subtitle: subtitle)
         buildPill()
         buildHud()
+        buildRecordBadge()
+        buildOverlay()
         if foldable { buildRail() }
         titleBar.alphaValue = 0
         titleBar.isHidden = true
         hud.isHidden = true
-        [pill, titleBar, hud].forEach(container.addSubview)
+        recordBadge.isHidden = true
+        overlay.isHidden = true
+        [overlay, pill, recordBadge, titleBar, hud].forEach(container.addSubview)
         if foldable { container.addSubview(rail) }
         setReady(false)
 
@@ -95,7 +114,7 @@ final class DeviceChrome: NSObject, NSPopoverDelegate {
         monitors.forEach(NSEvent.removeMonitor)
         monitors = []
         NotificationCenter.default.removeObserver(self)
-        [showTimer, hideTimer, toastTimer, hudTimer].forEach { $0?.invalidate() }
+        [showTimer, hideTimer, toastTimer, hudTimer, recordTimer].forEach { $0?.invalidate() }
         popover?.close()
     }
 
@@ -107,6 +126,10 @@ final class DeviceChrome: NSObject, NSPopoverDelegate {
         fitTitleBar(width: device.width)
         titleBar.frame = titleFrame(visible: titleVisible)
         pill.frame = CGRect(x: (device.midX - Self.pillWidth / 2).rounded(), y: box.minY, width: Self.pillWidth, height: Self.barHeight)
+        let badgeWidth = ceil(recordLabel.intrinsicContentSize.width) + 30
+        recordBadge.frame = CGRect(x: (device.midX - badgeWidth / 2).rounded(), y: box.maxY - Self.barHeight + 4, width: badgeWidth, height: 32)
+        overlay.frame = device
+        overlay.layer?.cornerRadius = min(device.width, device.height) * 0.09
         let hudWidth = min(max(150, ceil(hudLabel.intrinsicContentSize.width) + 28), device.width)
         hud.frame = CGRect(x: (device.midX - hudWidth / 2).rounded(), y: box.maxY - Self.barHeight, width: hudWidth, height: 32)
         let railHeight = Self.railHeight(buttons: postureButtons.count)
@@ -228,8 +251,15 @@ final class DeviceChrome: NSObject, NSPopoverDelegate {
         let volume = [keyButton("speaker.wave.1", "音量 −", "⌥⌘↓", "AudioVolumeDown", size: 32),
                       keyButton("speaker.wave.3", "音量 +", "⌥⌘↑", "AudioVolumeUp", size: 32)]
         let power = keyButton("power", "电源", "⌘L", "Power", size: 32)
-        titleButtons = [screenshot] + rotate + volume + [power]
-        droppableButtons = [volume, [power], rotate, [screenshot]]
+        if physical {
+            let record = actionButton("record.circle", "录屏", "⇧⌘R", .record)
+            recordButton = record
+            titleButtons = [screenshot, record] + volume + [power]
+            droppableButtons = [volume, [power], [record], [screenshot]]
+        } else {
+            titleButtons = [screenshot] + rotate + volume + [power]
+            droppableButtons = [volume, [power], rotate, [screenshot]]
+        }
         let more = ToolbarButton(symbol: "ellipsis", label: "更多功能", shortcut: nil, size: 32)
         more.onPress = { [weak self] pressed in if pressed { self?.toggleMore() } }
         moreButton = more
@@ -271,6 +301,78 @@ final class DeviceChrome: NSObject, NSPopoverDelegate {
             bootLabel.centerXAnchor.constraint(equalTo: pill.content.centerXAnchor),
             bootLabel.centerYAnchor.constraint(equalTo: pill.content.centerYAnchor),
         ])
+    }
+
+    private func buildRecordBadge() {
+        recordLabel.font = .monospacedDigitSystemFont(ofSize: 12, weight: .semibold)
+        recordLabel.textColor = .systemRed
+        let click = ClickView { [weak self] in self?.onAction?(.record) }
+        recordBadge.content.addSubview(click)
+        click.frame = recordBadge.content.bounds
+        click.autoresizingMask = [.width, .height]
+        recordBadge.content.addSubview(recordLabel)
+        recordLabel.translatesAutoresizingMaskIntoConstraints = false
+        NSLayoutConstraint.activate([
+            recordLabel.centerXAnchor.constraint(equalTo: recordBadge.content.centerXAnchor),
+            recordLabel.centerYAnchor.constraint(equalTo: recordBadge.content.centerYAnchor),
+        ])
+        recordBadge.toolTip = "停止录屏  ⇧⌘R"
+    }
+
+    private func buildOverlay() {
+        overlay.wantsLayer = true
+        overlay.layer?.backgroundColor = NSColor.black.withAlphaComponent(0.72).cgColor
+        overlayLabel.font = .systemFont(ofSize: 14, weight: .medium)
+        overlayLabel.textColor = .white
+        overlayLabel.alignment = .center
+        overlay.addSubview(overlayLabel)
+        overlayLabel.translatesAutoresizingMaskIntoConstraints = false
+        NSLayoutConstraint.activate([
+            overlayLabel.centerXAnchor.constraint(equalTo: overlay.centerXAnchor),
+            overlayLabel.centerYAnchor.constraint(equalTo: overlay.centerYAnchor),
+            overlayLabel.widthAnchor.constraint(lessThanOrEqualTo: overlay.widthAnchor, multiplier: 0.75),
+        ])
+    }
+
+    /// Covers the device with `text` (its first line bold); nil uncovers it.
+    func showOverlay(_ text: String?) {
+        guard let text else {
+            overlay.isHidden = true
+            return
+        }
+        let lines = text.components(separatedBy: "\n")
+        let string = NSMutableAttributedString(string: lines[0], attributes: [.font: NSFont.systemFont(ofSize: 17, weight: .semibold)])
+        if lines.count > 1 {
+            string.append(NSAttributedString(string: "\n" + lines.dropFirst().joined(separator: "\n"),
+                                             attributes: [.font: NSFont.systemFont(ofSize: 13)]))
+        }
+        let paragraph = NSMutableParagraphStyle()
+        paragraph.alignment = .center
+        paragraph.lineSpacing = 4
+        string.addAttributes([.foregroundColor: NSColor.white, .paragraphStyle: paragraph], range: NSRange(location: 0, length: string.length))
+        overlayLabel.attributedStringValue = string
+        overlay.isHidden = false
+    }
+
+    /// Marks the record button and shows how long the recording has run; nil when it stops.
+    func setRecording(since start: Date?) {
+        recordingSince = start
+        recordTimer?.invalidate()
+        recordTimer = nil
+        recordButton?.update(symbol: start == nil ? "record.circle" : "stop.circle.fill",
+                             label: start == nil ? "录屏" : "停止录屏", shortcut: "⇧⌘R")
+        recordButton?.tint = start == nil ? nil : .systemRed
+        if let start {
+            let update = { [weak self] in
+                let seconds = Int(Date().timeIntervalSince(start))
+                self?.recordLabel.stringValue = String(format: "● %02d:%02d", seconds / 60, seconds % 60)
+                self?.container?.needsLayout = true
+            }
+            update()
+            recordTimer = Timer.scheduledTimer(withTimeInterval: 1, repeats: true) { _ in MainActor.assumeIsolated { update() } }
+        }
+        recordBadge.isHidden = titleVisible || start == nil
+        container?.needsLayout = true
     }
 
     private func buildRail() {
@@ -404,6 +506,7 @@ final class DeviceChrome: NSObject, NSPopoverDelegate {
         hideTimer = nil
         guard visible != titleVisible else { return }
         titleVisible = visible
+        recordBadge.isHidden = visible || recordingSince == nil
         // A hidden bar must not take clicks in the empty room it leaves.
         if visible { titleBar.isHidden = false }
         let target = titleFrame(visible: visible)
@@ -435,13 +538,13 @@ final class DeviceChrome: NSObject, NSPopoverDelegate {
             popover.close()
             return
         }
-        guard let moreButton, let controls else { return }
+        guard let moreButton, let content = panel?() ?? controls.map({ AnyView(MorePanel(controls: $0)) }) else { return }
         let popover = NSPopover()
         // Closed here rather than by `.transient`, which took clicks inside it for ones outside while the
         // bars lived in panels that never became key; the rules below are the ones wanted either way.
         popover.behavior = .applicationDefined
         popover.delegate = self
-        let hosting = NSHostingController(rootView: MorePanel(controls: controls))
+        let hosting = NSHostingController(rootView: content)
         // The popover follows the panel's size as it switches between tiles and pages.
         hosting.sizingOptions = [.preferredContentSize]
         popover.contentViewController = hosting
@@ -655,6 +758,11 @@ final class ToolbarButton: NSView {
     /// Keeps the pressed look, e.g. while the button's popover is open.
     var isOn = false {
         didSet { updateBackground() }
+    }
+
+    /// The symbol's colour; nil for the label colour.
+    var tint: NSColor? {
+        didSet { imageView.contentTintColor = tint ?? .labelColor }
     }
 
     private var label: String

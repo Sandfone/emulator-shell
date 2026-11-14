@@ -113,7 +113,7 @@ struct MorePanel: View {
     }
 }
 
-private struct Tile: View {
+struct Tile: View {
     let symbol: String
     let title: String
     let status: String

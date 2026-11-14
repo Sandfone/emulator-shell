@@ -1,5 +1,6 @@
 import AppKit
 import CoreImage
+import SwiftUI
 
 /// A device-window command, from the main menu, the window's context menu or the chrome.
 enum DeviceCommand {
@@ -20,6 +21,7 @@ enum DeviceCommand {
             ],
             [
                 ("截图", .action(.screenshot), "s", [.command]),
+                ("开始或停止录屏", .action(.record), "r", [.command, .shift]),
                 ("向左旋转", .action(.rotateLeft), left, [.command]),
                 ("向右旋转", .action(.rotateRight), right, [.command]),
                 ("折叠 / 展开", .action(.toggleFold), "f", [.command, .shift]),
@@ -139,6 +141,11 @@ final class DeviceSession {
     private var lastSurface: IOSurface?
     /// The quarter turns `lastSurface` was reported at.
     private var lastRotation = 0
+    /// Set for a physical device, mirrored through scrcpy rather than run by an emulator.
+    private var physical: PhysicalLink?
+    /// A physical device's latest frames, kept alive so the decoder does not reuse their surfaces while they
+    /// are still on screen.
+    private var heldFrames: [CVPixelBuffer] = []
 
     /// `cascade` offsets the window so several devices do not open on top of each other.
     /// `extraArguments` go to the emulator as they are, e.g. the ones Android Studio or Flutter passed.
@@ -166,6 +173,24 @@ final class DeviceSession {
         try attach(running)
     }
 
+    /// Mirrors a physical device through its scrcpy stream, in the same kind of window as an emulator: a
+    /// plain bezel around a display of the size adb reports, which the Window menu's sizes use, the
+    /// physical size from the panel's real dots per inch.
+    init(physical device: PhysicalDevice, info: DeviceInfo, stream: ScrcpyStream, store: PhysicalDeviceStore, cascade: Int) throws {
+        let density = info.xdpi.map { Int($0.rounded()) } ?? info.density ?? 420
+        avd = Avd(id: device.id, folder: FileManager.default.temporaryDirectory, config: [
+            "avd.ini.displayname": device.name,
+            "hw.lcd.width": String(info.width), "hw.lcd.height": String(info.height), "hw.lcd.density": String(density),
+        ])
+        grpcPort = 0
+        physical = PhysicalLink(id: device.id, stream: stream, store: store, info: info, isWireless: device.isWireless)
+        openSkin = try DeviceSkin.load(avd: avd)
+        skin = openSkin
+        closedSkin = nil
+        showWindow(cascade: cascade)
+        connect(to: stream)
+    }
+
     /// The outer display's pixels are denser than the inner one's, so its skin draws the same device taller;
     /// scaled to the open skin's, the closed device is the open one's right half. Cut down to the device
     /// first, so that it fits the screen wherever the open one does.
@@ -191,6 +216,8 @@ final class DeviceSession {
 
     /// Shuts the emulator down like closing its window: the quick-boot snapshot is saved first.
     func stop() {
+        // A phone keeps running; its window only lets go of it.
+        if physical != nil { return tearDown() }
         guard state == .booting || state == .running else { return }
         state = .stopping
         window?.orderOut(nil)
@@ -209,7 +236,7 @@ final class DeviceSession {
 
     /// Closing the window: shuts down a device this app started, only lets go of one it is just showing.
     func close() {
-        if attached != nil { tearDown() } else { stop() }
+        if attached != nil || physical != nil { tearDown() } else { stop() }
     }
 
     /// For quitting: every device window goes away at once and the emulators save their snapshots in
@@ -258,6 +285,7 @@ final class DeviceSession {
 
     func run(_ command: DeviceCommand) {
         switch command {
+        case let .key(key) where physical != nil: AndroidKey.code(for: key).map(tapKey)
         case let .key(key): enqueue { await $0.sendKey(key) }
         case let .action(action): perform(action)
         }
@@ -314,7 +342,8 @@ final class DeviceSession {
         window.makeKeyAndOrderFront(nil)
         window.makeFirstResponder(view)
 
-        let chrome = DeviceChrome(container: shell, deviceName: avd.name, subtitle: subtitle(skin: skin), foldable: closedSkin != nil)
+        let chrome = DeviceChrome(container: shell, deviceName: avd.name, subtitle: subtitle(skin: skin), foldable: closedSkin != nil,
+                                  physical: physical != nil)
         chrome.onKey = { [weak self] key, pressed in self?.sendKey(key, pressed: pressed) }
         chrome.onAction = { [weak self] action in self?.perform(action) }
         shell.chrome = chrome
@@ -322,6 +351,7 @@ final class DeviceSession {
 
         view.onTouch = { [weak self] point, pressed in
             guard let self else { return }
+            if self.physical != nil { return self.physicalTouch(point, pressed: pressed) }
             let point = self.touchPoint(point)
             Log.debug("touch \(pressed ? "down" : "up") at \(Int(point.x)),\(Int(point.y))")
             self.enqueue { await $0.sendTouch(x: Int(point.x), y: Int(point.y), pressed: pressed) }
@@ -330,6 +360,7 @@ final class DeviceSession {
         view.onScreenPress = { [weak chrome] in chrome?.dismiss() }
         view.onKey = { [weak self] event in
             guard let output = KeyMapping.map(event) else { return }
+            if self?.physical != nil { return self?.physicalKey(output) ?? () }
             switch output {
             case let .key(key): self?.enqueue { await $0.sendKey(key) }
             case let .text(text): self?.enqueue { await $0.sendText(text) }
@@ -347,6 +378,7 @@ final class DeviceSession {
     /// "API 37.1 · 1280 × 2856", from the system image folder name and the display size.
     private func subtitle(skin: DeviceSkin) -> String {
         let resolution = "\(Int(skin.resolution.width)) × \(Int(skin.resolution.height))"
+        if let info = physical?.info { return "Android \(info.androidVersion) · \(resolution)" }
         guard let folder = avd.sysdir?.split(separator: "/").first(where: { $0.hasPrefix("android-") }) else { return resolution }
         return "API \(folder.dropFirst("android-".count)) · \(resolution)"
     }
@@ -725,6 +757,8 @@ final class DeviceSession {
         guard state != .stopped else { return }
         exitWatch?.cancel()
         exitWatch = nil
+        physical?.stream.removeSinks(AnyHashable(ObjectIdentifier(self)))
+        heldFrames = []
         tasks.forEach { $0.cancel() }
         streamTask?.cancel()
         postureTask?.cancel()
@@ -802,6 +836,10 @@ final class DeviceSession {
 
     private func sendKey(_ key: String, pressed: Bool) {
         Log.debug("key \(key) \(pressed ? "down" : "up")")
+        if let physical {
+            if let code = AndroidKey.code(for: key) { physical.stream.injectKey(code, action: pressed ? .down : .up) }
+            return
+        }
         enqueue { await $0.sendKey(key, type: pressed ? .keydown : .keyup) }
     }
 
@@ -813,14 +851,20 @@ final class DeviceSession {
         case .rotateLeft: rotate(by: 1)
         case .rotateRight: rotate(by: -1)
         case .toggleFold: toggleFold()
+        case .record: physical.map { $0.store?.toggleRecording($0.id) }
         case let .posture(posture): enqueue { _ = try? await $0.setPosture(posture) }
         }
     }
 
     /// Whether `command` applies to this device: folding only to a foldable with a closed skin.
     func isAvailable(_ command: DeviceCommand) -> Bool {
-        if case .action(.toggleFold) = command { return closedSkin != nil }
-        return true
+        switch command {
+        case .action(.toggleFold): return closedSkin != nil
+        // A phone turns when it is turned; recording is for phones for now.
+        case .action(.rotateLeft), .action(.rotateRight): return physical == nil
+        case .action(.record): return physical != nil
+        default: return true
+        }
     }
 
     /// Folds an open foldable shut or opens a closed one; the posture notification then plays the animation.
@@ -1263,6 +1307,16 @@ final class DeviceSession {
     // MARK: - Screenshot
 
     private func takeScreenshot() {
+        if let physical {
+            deviceView?.flash()
+            physical.store?.screenshot(physical.id) { [weak self] result in
+                switch result {
+                case let .success(url): self?.showToast("截图已存到桌面", url: url)
+                case let .failure(error): self?.showToast("截图失败：\(error.localizedDescription)", url: nil)
+                }
+            }
+            return
+        }
         guard let client else { return }
         deviceView?.flash()
         let formatter = DateFormatter()
@@ -1282,6 +1336,202 @@ final class DeviceSession {
         }
     }
 
+    // MARK: - Physical device
+
+    /// Shows the stream's frames, plays its sound and offers its options in the "More" popover.
+    private func connect(to stream: ScrcpyStream) {
+        guard let physical else { return }
+        physical.stream = stream
+        let key = AnyHashable(ObjectIdentifier(self))
+        stream.addFrameSink(key) { [weak self] frame, _ in
+            // Core Video buffers are safe to hand between threads.
+            nonisolated(unsafe) let frame = frame
+            DispatchQueue.main.async { MainActor.assumeIsolated { self?.showPhysicalFrame(frame) } }
+        }
+        let player = audio ?? DeviceAudio()
+        audio = player
+        stream.addAudioSink(key) { samples, _ in player.play(samples) }
+        if let store = physical.store {
+            let controls = physical.controls ?? PhysicalControls(id: physical.id, name: avd.name, info: physical.info,
+                                                                  isWireless: physical.isWireless, store: store)
+            physical.controls = controls
+            chrome?.panel = { AnyView(PhysicalMorePanel(controls: controls)) }
+        }
+        let view = deviceView
+        view?.onScroll = { [weak self] point, dx, dy, precise in
+            guard let self, let video = self.videoPoint(point) else { return }
+            // A trackpad reports points, a wheel lines; scrcpy wants wheel ticks.
+            let factor = precise ? 0.08 : 1
+            self.physical?.stream.injectScroll(at: video, horizontal: -dx * factor, vertical: dy * factor)
+        }
+        view?.onPaste = { [weak self] in
+            guard let text = NSPasteboard.general.string(forType: .string) else { return }
+            self?.physical?.stream.setClipboard(text, paste: true)
+        }
+        view?.onDropFiles = { [weak self] urls in
+            guard let physical = self?.physical else { return }
+            physical.store?.send(urls, to: physical.id)
+            self?.showToast(urls.contains { $0.pathExtension.lowercased() == "apk" } ? "正在安装…" : "正在传到手机…", url: nil)
+        }
+        physicalStreamChanged(stream.state)
+    }
+
+    /// The store started a new stream for this window (the device came back over another connection).
+    func physicalStreamReplaced(_ stream: ScrcpyStream) {
+        physical?.stream.removeSinks(AnyHashable(ObjectIdentifier(self)))
+        connect(to: stream)
+    }
+
+    func physicalStreamChanged(_ streamState: ScrcpyStream.State) {
+        switch streamState {
+        case .connecting:
+            if lastSurface != nil { chrome?.showOverlay("正在重新连接…") }
+        case .streaming:
+            chrome?.showOverlay(nil)
+            chrome?.setReady(true)
+            if state == .booting { state = .running }
+        case let .ended(message):
+            guard state != .stopped else { return }
+            let reconnects = "重新插上数据线，或回到同一个 Wi-Fi，会自动继续。"
+            chrome?.showOverlay(message == nil || physical?.store?.device(physical?.id ?? "")?.isOnline == false
+                                ? "设备已断开\n\(reconnects)" : "投屏中断了\n\(message ?? "")")
+        }
+    }
+
+    func physicalVideoSizeChanged(_ size: CGSize) {
+        Log.debug("video is now \(Int(size.width)) × \(Int(size.height))")
+        physical?.rotationChecked = false
+    }
+
+    func physicalAudioChanged(_ available: Bool) {
+        physical?.controls?.audioAvailable = available
+    }
+
+    func setRecording(since start: Date?) {
+        chrome?.setRecording(since: start)
+    }
+
+    func showToast(_ text: String, url: URL?) {
+        chrome?.showToast(text) {
+            if let url { NSWorkspace.shared.activateFileViewerSelecting([url]) }
+        }
+    }
+
+    /// A decoded frame, upright as the device shows it. Its shape tells whether the device is held the way
+    /// its display is long or across; which way round it is held, adb tells.
+    private func showPhysicalFrame(_ frame: CVPixelBuffer) {
+        guard state != .stopped, let view = deviceView, let surface = CVPixelBufferGetIOSurface(frame)?.takeUnretainedValue() else { return }
+        heldFrames.append(frame)
+        if heldFrames.count > 3 { heldFrames.removeFirst() }
+        let width = CVPixelBufferGetWidth(frame), height = CVPixelBufferGetHeight(frame)
+        let natural = openSkin.display.size
+        let across = width != height && (width > height) != (natural.width > natural.height)
+        var turns = deviceTurns
+        if across != (turns % 2 == 1) {
+            turns = across ? 1 : 0
+            refinePhysicalRotation(across: across)
+        } else if physical?.rotationChecked == false {
+            // A window opened the way it was last held, or a new session: which way round is not known yet.
+            refinePhysicalRotation(across: across)
+        }
+        lastSurface = surface
+        lastRotation = turns
+        view.show(frame: surface, rotation: turns)
+        deviceTurned(to: turns)
+    }
+
+    /// Asks the device which way round it is held (90° or 270°, upright or upside down), which the frames'
+    /// shape does not say.
+    private func refinePhysicalRotation(across: Bool) {
+        guard let physical else { return }
+        physical.rotationChecked = true
+        let serial = physical.stream.serial
+        Task { [weak self] in
+            // The main display's viewport (newer Android), or the touchscreen's orientation (older).
+            let command = "dumpsys input | grep -E 'displayId=0,|SurfaceOrientation' | grep -m1 -o -E 'orientation=[0-3]|SurfaceOrientation: [0-3]'"
+            guard let output = try? await Adb.shell(command, serial: serial),
+                  let range = output.range(of: #"(SurfaceOrientation: |orientation=)([0-3])"#, options: .regularExpression),
+                  let turns = output[range].last?.wholeNumberValue else { return }
+            guard let self, (turns % 2 == 1) == across, self.lastRotation % 2 == turns % 2, self.lastRotation != turns else { return }
+            Log.debug("device reports rotation \(turns)")
+            self.lastRotation = turns
+            if let surface = self.lastSurface { self.deviceView?.show(frame: surface, rotation: turns) }
+            self.deviceTurned(to: turns)
+        }
+    }
+
+    private func physicalTouch(_ point: CGPoint, pressed: Bool) {
+        guard let physical, let video = videoPoint(point) else { return }
+        let stream = physical.stream
+        let action: ScrcpyStream.TouchAction = !pressed ? .up : physical.touching ? .move : .down
+        if action != .move { Log.debug("touch \(action) at \(Int(video.x)),\(Int(video.y)) of \(stream.videoSize)") }
+        if action == .down { warnIfInputBlocked() }
+        // ⌥-drag pinches: a second finger mirrors the first about the screen's centre.
+        if action == .down { physical.pinching = NSEvent.modifierFlags.contains(.option) }
+        physical.touching = pressed
+        stream.injectTouch(action, at: video)
+        if physical.pinching {
+            let size = stream.videoSize
+            stream.injectTouch(action, pointer: ScrcpyStream.virtualFingerPointer,
+                               at: CGPoint(x: size.width - 1 - video.x, y: size.height - 1 - video.y))
+        }
+    }
+
+    /// A point on the display in its natural orientation's pixels (as the view reports touches), in the pixels
+    /// of the video as the device now shows it.
+    private func videoPoint(_ point: CGPoint) -> CGPoint? {
+        guard let video = physical?.stream.videoSize, video.width > 0 else { return nil }
+        let w = openSkin.display.width, h = openSkin.display.height
+        let logical: CGPoint
+        let size: CGSize
+        switch (lastRotation % 4 + 4) % 4 {
+        case 1: (logical, size) = (CGPoint(x: point.y, y: w - point.x), CGSize(width: h, height: w))
+        case 2: (logical, size) = (CGPoint(x: w - point.x, y: h - point.y), CGSize(width: w, height: h))
+        case 3: (logical, size) = (CGPoint(x: h - point.y, y: point.x), CGSize(width: h, height: w))
+        default: (logical, size) = (point, CGSize(width: w, height: h))
+        }
+        return CGPoint(x: min(max(logical.x * video.width / size.width, 0), video.width - 1),
+                       y: min(max(logical.y * video.height / size.height, 0), video.height - 1))
+    }
+
+    /// On a Xiaomi device whose developer options block input from adb, says what to turn on; it is read
+    /// again each time, so the warning stops once the setting is on.
+    private func warnIfInputBlocked() {
+        guard let physical, physical.inputBlocked, Date().timeIntervalSince(physical.lastInputWarning) > 8 else { return }
+        physical.lastInputWarning = Date()
+        let serial = physical.stream.serial
+        Task { [weak self] in
+            let value = try? await Adb.shell("getprop persist.security.adbinput", serial: serial)
+            guard let self, let physical = self.physical else { return }
+            if value?.trimmingCharacters(in: .whitespacesAndNewlines) == "1" {
+                physical.inputBlocked = false
+            } else {
+                self.chrome?.showToast("这台手机不接受电脑的操作：在开发者选项里打开“USB 调试（安全设置）”") {}
+            }
+        }
+    }
+
+    private func physicalKey(_ output: KeyMapping.Output) {
+        warnIfInputBlocked()
+        switch output {
+        case let .key(key):
+            if let code = AndroidKey.code(for: key) { tapKey(code) } else { type(key) }
+        case let .text(text):
+            type(text)
+        }
+    }
+
+    /// Text the device's keyboard can type goes as keys; anything else (Chinese, emoji) is pasted.
+    private func type(_ text: String) {
+        guard let stream = physical?.stream else { return }
+        if text.allSatisfy(\.isASCII) { stream.injectText(text) } else { stream.setClipboard(text, paste: true) }
+    }
+
+    private func tapKey(_ code: Int32) {
+        physical?.stream.injectKey(code, action: .down)
+        physical?.stream.injectKey(code, action: .up)
+    }
+
     private func fail(_ error: Error) {
         Log.error("\(avd.id): \(error)")
         let alert = NSAlert()
@@ -1289,6 +1539,34 @@ final class DeviceSession {
         alert.informativeText = "\(error)"
         alert.runModal()
         close()
+    }
+}
+
+/// What a physical device's window needs of its stream and of the store that owns it.
+@MainActor
+final class PhysicalLink {
+    let id: String
+    var stream: ScrcpyStream
+    weak var store: PhysicalDeviceStore?
+    let info: DeviceInfo
+    let isWireless: Bool
+    var controls: PhysicalControls?
+    /// The device refuses input from adb (see `DeviceInfo.inputBlocked`), and when that was last said.
+    var inputBlocked: Bool
+    var lastInputWarning = Date.distantPast
+    /// A finger is down on the screen; with ⌥ held as it went down, a pinch.
+    var touching = false
+    var pinching = false
+    /// Whether the device was asked which way round it is held since the video last changed size.
+    var rotationChecked = false
+
+    init(id: String, stream: ScrcpyStream, store: PhysicalDeviceStore, info: DeviceInfo, isWireless: Bool) {
+        self.id = id
+        self.stream = stream
+        self.store = store
+        self.info = info
+        self.isWireless = isWireless
+        inputBlocked = info.inputBlocked
     }
 }
 

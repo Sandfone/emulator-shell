@@ -39,10 +39,12 @@ final class DeviceManager {
     enum Sheet: Identifiable {
         case form(AvdForm)
         case images
+        case pairing
         var id: String {
             switch self {
             case .form: "form"
             case .images: "images"
+            case .pairing: "pairing"
             }
         }
     }
@@ -58,6 +60,8 @@ final class DeviceManager {
     }
 
     var avds: [Avd] = []
+    /// Phones and tablets connected over USB or Wi-Fi.
+    let phones = PhysicalDeviceStore()
     var deviceTypes: [DeviceType] = []
     var images: [SystemImage] = []
     var selection: String?
@@ -96,6 +100,7 @@ final class DeviceManager {
             availableImages = SystemImage.parseAvailable(cached)
             availableImagesUpdated = (try? Self.listCache.resourceValues(forKeys: [.contentModificationDateKey]))?.contentModificationDate
         }
+        phones.onError = { [weak self] message in self?.errorMessage = message }
         reload()
         timer = Timer.scheduledTimer(withTimeInterval: 2, repeats: true) { [weak self] _ in
             MainActor.assumeIsolated { self?.refreshRunning() }
@@ -107,17 +112,35 @@ final class DeviceManager {
 
     func reload() {
         avds = Avd.loadAll()
-        if selection == nil || !avds.contains(where: { $0.id == selection }) { selection = avds.first?.id }
+        if selection == nil || !avds.contains(where: { $0.id == selection }) && selectedPhysical == nil {
+            selection = phones.devices.first?.id ?? avds.first?.id
+        }
         images = SystemImage.merge(installed: SystemImage.scanInstalled(), available: availableImages)
         refreshRunning()
         measureSizes()
     }
 
     var selectedAvd: Avd? { avds.first { $0.id == selection } }
+    var selectedPhysical: PhysicalDevice? { phones.devices.first { $0.id == selection } }
     var runningSessions: [DeviceSession] { Array(sessions.values) }
 
     func session(for window: NSWindow?) -> DeviceSession? {
-        sessions.values.first { $0.window === window && window != nil }
+        guard let window else { return nil }
+        return sessions.values.first { $0.window === window } ?? phones.sessions.values.first { $0.window === window }
+    }
+
+    /// A physical device's row is keyed by its serial number once that is read; until then by adb's serial.
+    /// A selected row whose key changed stays selected.
+    func followPhysicalSelection() {
+        guard let selection, selection.hasPrefix("device:"), selectedPhysical == nil else { return }
+        let serial = String(selection.dropFirst("device:".count))
+        if let device = phones.devices.first(where: { $0.serials.contains(serial) }) {
+            self.selection = device.id
+        }
+    }
+
+    func mirror(_ device: PhysicalDevice) {
+        phones.mirror(device.id, cascade: sessions.count + phones.sessions.count)
     }
 
     func status(of avd: Avd) -> Status {
@@ -617,13 +640,16 @@ final class DeviceManager {
 
     // MARK: - Quitting
 
-    var hasSessions: Bool { !sessions.isEmpty }
+    var hasSessions: Bool { !sessions.isEmpty || phones.hasWork }
     /// Whether a device is between its two runs of a restart, with no window meanwhile.
     var isRestarting: Bool { !restarting.isEmpty }
 
     /// Shuts every device down, saving snapshots, and calls `done` once all emulators have exited.
     func stopAllSessions(then done: @escaping () -> Void) {
-        DeviceSession.stopAll(Array(sessions.values), then: done)
+        var waiting = 2
+        let finished = { waiting -= 1; if waiting == 0 { done() } }
+        phones.stopAll(then: finished)
+        DeviceSession.stopAll(Array(sessions.values), then: finished)
     }
 
     func stopAllSessions() {

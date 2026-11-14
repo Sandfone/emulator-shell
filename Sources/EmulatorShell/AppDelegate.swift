@@ -86,7 +86,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
             let window = NSWindow(contentViewController: hosting)
             window.styleMask = [.titled, .closable, .miniaturizable, .resizable, .fullSizeContentView]
             window.toolbarStyle = .unified
-            window.title = "模拟器"
+            window.title = "设备"
             window.isReleasedWhenClosed = false
             window.minSize = CGSize(width: 900, height: 560)
             window.setContentSize(CGSize(width: 1120, height: 720))
@@ -218,7 +218,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
         main.addItem(submenu: deviceMenu, title: "设备")
 
         let windowMenu = NSMenu(title: "窗口")
-        let managerItem = windowMenu.addItem(withTitle: "模拟器管理器", action: #selector(showManager), keyEquivalent: "2")
+        let managerItem = windowMenu.addItem(withTitle: "设备管理器", action: #selector(showManager), keyEquivalent: "2")
         managerItem.keyEquivalentModifierMask = [.command, .shift]
         managerItem.target = self
         windowMenu.addItem(.separator())
@@ -248,7 +248,20 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
 
     @objc private func runDeviceCommand(_ sender: NSMenuItem) {
         guard let command = sender.representedObject as? DeviceCommand else { return }
-        currentSession?.run(command)
+        if let session = currentSession { return session.run(command) }
+        // In the manager, screenshots and recording work on the selected phone.
+        guard let device = managerPhone else { return }
+        switch command {
+        case .action(.screenshot): manager.phones.screenshot(device.id)
+        case .action(.record): manager.phones.toggleRecording(device.id)
+        default: break
+        }
+    }
+
+    /// The phone selected in the manager window, while that window is in front.
+    private var managerPhone: PhysicalDevice? {
+        guard NSApp.keyWindow === managerWindow, let device = manager.selectedPhysical, device.isOnline else { return nil }
+        return device
     }
 
     @objc private func zoomDevice(_ sender: NSMenuItem) {
@@ -277,7 +290,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
             return EmulatorForwarder.commandLink != nil
         }
         if menuItem.action == #selector(runDeviceCommand(_:)) {
-            guard let session = currentSession, let command = menuItem.representedObject as? DeviceCommand else { return false }
+            guard let command = menuItem.representedObject as? DeviceCommand else { return false }
+            guard let session = currentSession else {
+                guard managerPhone != nil else { return false }
+                if case .action(.screenshot) = command { return true }
+                if case .action(.record) = command { return true }
+                return false
+            }
             return session.state == .running && session.isAvailable(command)
         }
         if menuItem.action == #selector(zoomDevice(_:)), let zoom = menuItem.representedObject as? DeviceZoom {

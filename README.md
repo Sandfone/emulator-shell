@@ -15,8 +15,8 @@ swift build
 .build/debug/EmulatorShell
 ```
 
-Without arguments the device manager opens: AVDs grouped by category on the left, the selected
-one's details on the right. From there you start, stop, create, edit, duplicate, wipe and delete
+Without arguments the device manager opens: phones and tablets connected over USB or Wi-Fi, then AVDs
+grouped by category on the left, the selected one's details on the right (see Physical devices). From there you start, stop, create, edit, duplicate, wipe and delete
 AVDs and download or remove system images. `EmulatorShell <avd> [emulator arguments]` opens that device
 directly, without the manager, and quits when its window closes.
 
@@ -300,9 +300,71 @@ can hit the deadlock), and turning it off restarts it with `-audio none`. The ch
 (`microphone.<avd>` in the app's defaults). A restart saves and loads the quick-boot snapshot, so it
 takes a few seconds.
 
+## Physical devices
+
+The manager's sidebar starts with **物理设备**: every device adb sees that is not an emulator, from
+`adb track-devices -l`, so a device shows up or goes away within a second of being plugged in or
+unplugged, without polling. The SDK's own adb is used (the one Android Studio uses), so both share one adb
+server; without platform-tools the pane offers to install them with `sdkmanager`. Each device's details
+(name, Android version, display size and density, battery, storage) come from one `adb shell` call once it
+is authorized; the name is `ro.product.marketname` where the vendor sets it, else the model. A device
+connected over both USB and Wi-Fi is one row, using USB; two USB devices are always two rows, even when
+they report the same serial number, as some cheap ones do.
+
+| State | Shown |
+|---|---|
+| Authorized | Live preview (`screencap` every 2 s while selected, the stream's frames while it runs), 投屏, 截图, 录屏, and a "⋯" menu: switch to Wi-Fi (`adb tcpip 5555` + `adb connect`), install an APK or copy files, reboot, disconnect / forget a Wi-Fi device |
+| Unauthorized | How to allow USB debugging on the device; it turns into the above once allowed |
+| Offline | A paired Wi-Fi device away from the network stays listed (remembered in the defaults, `pairedDevices`) with 重新连接 and 忘记此设备 |
+| None connected | A "连接 Android 设备…" row with the steps for USB and a link to Wi-Fi pairing |
+
+**Wi-Fi pairing** (⇧⌘N or the toolbar, Android 11+) works like Android Studio's: a QR code
+`WIFI:T:ADB;S:<name>;P:<password>;;` that the device scans under Wireless debugging, after which the device
+offers that pairing service over mDNS and `adb pair` completes it; or the device's six-digit code for a
+pairing service found with `adb mdns services`. adb then connects to paired devices by itself.
+
+**Mirroring** runs scrcpy-server 5.0.1 (`vendor/scrcpy`, Apache 2.0) on the device: it is pushed to
+`/data/local/tmp` (each time, as it deletes itself on start) and started with `app_process`; one
+`adb forward` carries a video socket (H.264 from the device's encoder, decoded with VideoToolbox into
+IOSurface-backed frames), an audio socket (raw 48 kHz 16-bit stereo, Android 11+, played like an
+emulator's sound) and a control socket (`Scrcpy.swift`). The device gets the same kind of window as an
+emulator: a plain bezel around a display of the size adb reports, the Window menu's sizes (物理尺寸 from
+the panel's real dpi in `dumpsys display`), corner resizing and a remembered placement. It follows the
+device's own rotation: a new video size says the device turned, and `dumpsys input` says which way round;
+the rotate buttons are left out. Closing the window only stops mirroring.
+
+- Input: click or drag is one finger; ⌥-drag adds a second finger mirrored about the centre (pinch);
+  scrolling scrolls; keys as for an emulator, ASCII text typed as keys and anything else (Chinese,
+  emoji) pasted through the device's clipboard; ⌘V pastes the Mac's clipboard; dropping an APK on the
+  device installs it, other files go to `/sdcard/Download`.
+- MIUI and HyperOS refuse input from adb until "USB debugging (Security settings)" is turned on in the
+  developer options (`persist.security.adbinput`); the detail pane says so and the window reminds on
+  the first touch. The screen still streams.
+- The window's "More" popover: sound on the Mac or on the device, turning the device's own screen off
+  while mirroring, keeping it awake, clipboard sync, showing touches, quality (long side 1280 / 1920 /
+  original at 4 / 8 / 16 Mbit/s) and sending files. Options other than the screen are scrcpy start
+  options, so changing them reconnects the stream; they are kept per device (`mirror.<id>`).
+- A stream that ends while the window is open (unplugged, Wi-Fi lost, the server killed) covers the
+  device with a message; it starts again on its own when the device comes back, on whichever connection.
+
+**Screenshots** (⌘S, in the window or for the device selected in the manager) are `screencap` PNGs at the
+display's resolution, on the Desktop as `<name>_<date>.png`. A black one (an app with `FLAG_SECURE`) is
+not saved.
+
+**Recording** (⇧⌘R, likewise) needs no window: it opens the stream if none runs. The decoded frames are
+encoded again to H.264 with AVAssetWriter, at the size of the first frame; after a turn the frames are
+fitted into that size with black bars, since one MP4 track cannot change size. The sound is added when the
+device sends it. The file goes to the Desktop as `<name>_<date>.mp4` and is finished properly when the
+device goes away or the app quits. While recording, the sidebar row and the detail pane show the time, and
+the window shows it above the device.
+
+`EMULATOR_SHELL_MIRROR_EMULATORS=1` lists running emulators among the physical devices too (scrcpy works
+with them), for trying all this without a phone.
+
 ## Not done yet
 
-- No scroll wheel or multi-touch.
+- No scroll wheel or multi-touch on emulators (physical devices have both).
+- Recording is for physical devices only; an emulator has the screenshot only.
 - A foldable shows only the open or the closed display, not both at once (Pixel Fold's rear display
   mode), and the half-open posture is drawn as open.
 
