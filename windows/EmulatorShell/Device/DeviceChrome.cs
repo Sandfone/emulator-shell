@@ -13,7 +13,7 @@ using PostureValue = Android.Emulation.Control.Posture.Types.PostureValue;
 
 namespace EmulatorShell;
 
-enum DeviceAction { Close, Minimize, Screenshot, RotateLeft, RotateRight, ToggleFold }
+enum DeviceAction { Close, Minimize, Screenshot, Record, RotateLeft, RotateRight, ToggleFold }
 
 /// The controls around the device, inside its window: Back / Home / Recents in a pill under the device,
 /// always shown, and a title bar with the remaining buttons that appears while the pointer is near the
@@ -32,6 +32,8 @@ sealed class DeviceChrome
     public DeviceControls? Controls { get; set; }
     /// The window's menu, built each time the title bar's menu button opens it.
     public Func<MenuFlyout>? MenuProvider { get; set; }
+    /// The "More" flyout's content for a device without `Controls` (a physical one).
+    public Func<UIElement>? PanelProvider { get; set; }
 
     public const double BarHeight = 44;
     public const double Gap = 12;
@@ -60,7 +62,23 @@ sealed class DeviceChrome
     /// The menu or the "More" panel, whichever is open: the title bar stays while it is.
     private FlyoutBase? flyout;
     private Border? toast;
-    private readonly DispatcherQueueTimerHolder toastTimer, hudTimer, showTimer, hideTimer, pointerTimer;
+    private readonly DispatcherQueueTimerHolder toastTimer, hudTimer, showTimer, hideTimer, pointerTimer, recordTimer;
+    /// A physical device: no rotate buttons (it turns when it is turned), a record button instead.
+    private readonly bool physical;
+    private readonly ToolbarButton? recordButton;
+    /// While recording: when it started, and the badge that shows for how long while the title bar is hidden.
+    private DateTime? recordingSince;
+    private readonly Border recordBadge;
+    private readonly TextBlock recordLabel = new()
+    {
+        FontSize = 12, FontWeight = FontWeights.SemiBold, FontFamily = new FontFamily("Cascadia Mono, Consolas, Segoe UI"),
+        Foreground = new SolidColorBrush(Color.FromArgb(255, 0xE5, 0x39, 0x35)),
+        HorizontalAlignment = HorizontalAlignment.Center, VerticalAlignment = VerticalAlignment.Center,
+    };
+    /// Covers the device with a message, e.g. while a phone is disconnected.
+    private readonly Border overlay;
+    private readonly TextBlock overlayTitle = new() { FontSize = 17, FontWeight = FontWeights.SemiBold, Foreground = new SolidColorBrush(Colors.White), TextAlignment = TextAlignment.Center, TextWrapping = TextWrapping.Wrap };
+    private readonly TextBlock overlayText = new() { FontSize = 13, Foreground = new SolidColorBrush(Colors.White), TextAlignment = TextAlignment.Center, TextWrapping = TextWrapping.Wrap, LineHeight = 20 };
     private bool titleVisible;
     /// Shown whatever the pointer does, while a drag holds the window against the top of the screen.
     private bool titleHeld;
@@ -74,11 +92,14 @@ sealed class DeviceChrome
     private readonly List<List<ToolbarButton>> droppableButtons = [];
     private bool wasActive = true;
 
-    /// `foldable` adds the posture rail.
-    public DeviceChrome(DeviceWindow window, string deviceName, string subtitle, bool foldable)
+    /// `foldable` adds the posture rail; `physical` is a phone mirrored through scrcpy.
+    public DeviceChrome(DeviceWindow window, string deviceName, string subtitle, bool foldable, bool physical = false)
     {
         this.window = window;
+        this.physical = physical;
         container = window.Root;
+        recordTimer = new(window);
+        if (physical) bootLabel.Text = "正在连接…";
         toastTimer = new(window);
         hudTimer = new(window);
         showTimer = new(window);
@@ -100,10 +121,21 @@ sealed class DeviceChrome
                                       KeyButton("", "音量 +", "Ctrl+Alt+↑", "AudioVolumeUp")];
         var power = KeyButton("", "电源", "Ctrl+L", "Power");
         titleButtons.Add(screenshot);
-        titleButtons.AddRange(rotate);
-        titleButtons.AddRange(volume);
-        titleButtons.Add(power);
-        droppableButtons.AddRange([volume, [power], rotate, [screenshot]]);
+        if (physical)
+        {
+            recordButton = ActionButton("\uE7C8", "录屏", "Ctrl+Shift+R", DeviceAction.Record);
+            titleButtons.Add(recordButton);
+            titleButtons.AddRange(volume);
+            titleButtons.Add(power);
+            droppableButtons.AddRange([volume, [power], [recordButton], [screenshot]]);
+        }
+        else
+        {
+            titleButtons.AddRange(rotate);
+            titleButtons.AddRange(volume);
+            titleButtons.Add(power);
+            droppableButtons.AddRange([volume, [power], rotate, [screenshot]]);
+        }
         moreButton = new ToolbarButton("", "更多功能", null);
         moreButton.Pressed += pressed => { if (pressed) ToggleMore(); };
         titleButtons.Add(moreButton);
@@ -164,8 +196,35 @@ sealed class DeviceChrome
             rail = Glass(22, stack);
         }
 
+        // Glass, but a click on it stops the recording rather than dragging the window.
+        recordBadge = new Border
+        {
+            CornerRadius = new CornerRadius(16),
+            Background = (Brush)Application.Current.Resources["AcrylicInAppFillColorDefaultBrush"],
+            BorderBrush = (Brush)Application.Current.Resources["SurfaceStrokeColorFlyoutBrush"],
+            BorderThickness = new Thickness(1),
+            Child = recordLabel,
+            Visibility = Visibility.Collapsed,
+        };
+        recordBadge.PointerPressed += (_, e) => e.Handled = true;
+        recordBadge.Tapped += (_, _) => Action?.Invoke(DeviceAction.Record);
+        ToolTipService.SetToolTip(recordBadge, "停止录屏  Ctrl+Shift+R");
+        overlay = new Border
+        {
+            Background = new SolidColorBrush(Color.FromArgb(184, 0, 0, 0)),
+            IsHitTestVisible = false,
+            Visibility = Visibility.Collapsed,
+            Child = new StackPanel
+            {
+                Spacing = 6, VerticalAlignment = VerticalAlignment.Center, HorizontalAlignment = HorizontalAlignment.Center, Margin = new Thickness(24),
+                Children = { overlayTitle, overlayText },
+            },
+        };
+
+        container.Children.Add(overlay);
         container.Children.Add(pill);
         if (rail != null) container.Children.Add(rail);
+        container.Children.Add(recordBadge);
         container.Children.Add(titleBar);
         container.Children.Add(hud);
         SetReady(false);
@@ -202,7 +261,7 @@ sealed class DeviceChrome
     public void Close()
     {
         closed = true;
-        foreach (var timer in new[] { toastTimer, hudTimer, showTimer, hideTimer, pointerTimer }) timer.Stop();
+        foreach (var timer in new[] { toastTimer, hudTimer, showTimer, hideTimer, pointerTimer, recordTimer }) timer.Stop();
         flyout?.Hide();
     }
 
@@ -215,6 +274,7 @@ sealed class DeviceChrome
             if (rail != null) yield return Bounds(rail);
             if (titleBar.Visibility == Visibility.Visible) yield return Bounds(titleBar);
             if (hud.Visibility == Visibility.Visible) yield return Bounds(hud);
+            if (recordBadge.Visibility == Visibility.Visible) yield return Bounds(recordBadge);
         }
     }
 
@@ -242,6 +302,48 @@ sealed class DeviceChrome
             Place(rail, device.Right + Gap, Math.Round(device.Y + device.Height / 2 - railHeight / 2.0), BarHeight, railHeight);
         }
         if (toast != null) Place(toast, Math.Round(device.X + device.Width / 2 - toast.Width / 2), device.Y + 60, toast.Width, 36);
+        recordLabel.Measure(new Size(double.PositiveInfinity, double.PositiveInfinity));
+        var badgeWidth = Math.Ceiling(recordLabel.DesiredSize.Width) + 30;
+        Place(recordBadge, Math.Round(middle - badgeWidth / 2), box.Y + BarHeight - 36, badgeWidth, 32);
+        Place(overlay, device.X, device.Y, device.Width, device.Height);
+        overlay.CornerRadius = new CornerRadius(Math.Min(device.Width, device.Height) * 0.09);
+    }
+
+    /// Covers the device with `text` (its first line bold); null uncovers it.
+    public void ShowOverlay(string? text)
+    {
+        if (text == null)
+        {
+            overlay.Visibility = Visibility.Collapsed;
+            return;
+        }
+        var lines = text.Split('\n');
+        overlayTitle.Text = lines[0];
+        overlayText.Text = string.Join("\n", lines.Skip(1));
+        overlayText.Visibility = lines.Length > 1 ? Visibility.Visible : Visibility.Collapsed;
+        overlay.Visibility = Visibility.Visible;
+    }
+
+    /// Marks the record button and shows how long the recording has run; null when it stops.
+    public void SetRecording(DateTime? start)
+    {
+        recordingSince = start;
+        recordTimer.Stop();
+        recordButton?.Update(start == null ? "\uE7C8" : "\uE71A", start == null ? "录屏" : "停止录屏", "Ctrl+Shift+R");
+        if (recordButton != null) recordButton.Tint = start == null ? null : new SolidColorBrush(Color.FromArgb(255, 0xE5, 0x39, 0x35));
+        if (start is { } since)
+        {
+            void Update()
+            {
+                var seconds = Math.Max(0, (int)(DateTime.Now - since).TotalSeconds);
+                recordLabel.Text = $"● {seconds / 60:00}:{seconds % 60:00}";
+                Layout(device, box);
+            }
+            Update();
+            recordTimer.StartRepeating(TimeSpan.FromSeconds(1), Update);
+        }
+        recordBadge.Visibility = titleVisible || start == null ? Visibility.Collapsed : Visibility.Visible;
+        ShapeChanged?.Invoke();
     }
 
     private static void Place(FrameworkElement element, double x, double y, double width, double height)
@@ -438,6 +540,7 @@ sealed class DeviceChrome
         hideTimer.Stop();
         if (visible == titleVisible) return;
         titleVisible = visible;
+        recordBadge.Visibility = visible || recordingSince == null ? Visibility.Collapsed : Visibility.Visible;
         titleStory?.Stop();
         // A hidden bar must not take clicks in the empty room it leaves.
         if (visible)
@@ -500,10 +603,10 @@ sealed class DeviceChrome
             flyout.Hide();
             if (wasMore) return;
         }
-        if (Controls == null) return;
+        if ((Controls != null ? new MorePanel(Controls) : PanelProvider?.Invoke()) is not { } content) return;
         var more = new Flyout
         {
-            Content = new MorePanel(Controls),
+            Content = content,
             Placement = FlyoutPlacementMode.BottomEdgeAlignedRight,
             // A popup window of its own, so it may reach past the device window's edges.
             ShouldConstrainToRootBounds = false,
@@ -628,6 +731,18 @@ sealed partial class ToolbarButton : Grid
         }
     }
 
+    /// The glyph's colour; null for the text colour.
+    public Brush? Tint
+    {
+        get => tint;
+        set
+        {
+            tint = value;
+            UpdateBackground();
+        }
+    }
+    private Brush? tint;
+
     /// Keeps the pressed look, e.g. while the button's flyout is open.
     public bool IsOn
     {
@@ -647,7 +762,7 @@ sealed partial class ToolbarButton : Grid
             icon.Foreground = new SolidColorBrush(Colors.White);
             return;
         }
-        icon.ClearValue(FontIcon.ForegroundProperty);
+        if (tint != null) icon.Foreground = tint; else icon.ClearValue(FontIcon.ForegroundProperty);
         var alpha = pressed || isOn ? 0.15 : hovered && enabled ? 0.07 : 0;
         var text = (Color)Application.Current.Resources["TextFillColorPrimary"];
         Background = new SolidColorBrush(Color.FromArgb((byte)(alpha * 255), text.R, text.G, text.B));

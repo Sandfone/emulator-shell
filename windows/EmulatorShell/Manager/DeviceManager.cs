@@ -79,9 +79,21 @@ sealed class DeviceManager
 
     private static readonly string ListCache = Path.Combine(Settings.Folder, "sdkmanager-list.txt");
 
+    /// Phones and tablets connected over USB or Wi-Fi.
+    public PhysicalDeviceStore Phones { get; }
+
     public DeviceManager()
     {
         queue = DispatcherQueue.GetForCurrentThread();
+        Phones = new PhysicalDeviceStore();
+        Phones.Error += message => Error?.Invoke(message);
+        Phones.Changed += () =>
+        {
+            FollowPhysicalSelection();
+            Notify();
+            // A phone's window or recording that ends may be the last thing the app shows.
+            SessionsChanged?.Invoke();
+        };
         try
         {
             availableImages = SystemImage.ParseAvailable(File.ReadAllText(ListCache));
@@ -103,7 +115,8 @@ sealed class DeviceManager
     public void Reload()
     {
         Avds = Avd.LoadAll();
-        if (Selection == null || Avds.All(a => a.Id != Selection)) Selection = Avds.FirstOrDefault()?.Id;
+        if (Selection == null || Avds.All(a => a.Id != Selection) && SelectedPhysical == null && !(Selection == PhysicalHelpId && ShowsPhysicalHelp))
+            Selection = Phones.Devices.FirstOrDefault()?.Id ?? Avds.FirstOrDefault()?.Id;
         Images = SystemImage.Merge(SystemImage.ScanInstalled(), availableImages);
         RefreshRunning(notify: false);
         MeasureSizes();
@@ -111,6 +124,23 @@ sealed class DeviceManager
     }
 
     public Avd? SelectedAvd => Avds.FirstOrDefault(a => a.Id == Selection);
+    public PhysicalDevice? SelectedPhysical => Phones.Device(Selection);
+    /// The selection of the "connect a device" row, shown only while the SDK has no adb: it offers to install it.
+    public const string PhysicalHelpId = "device:";
+    public bool ShowsPhysicalHelp => !Phones.AdbInstalled;
+
+    /// A physical device's row is keyed by its serial number once that is read; until then by adb's serial. A
+    /// selected row whose key changed stays selected.
+    private void FollowPhysicalSelection()
+    {
+        // The help row goes once adb is installed.
+        if (Selection == PhysicalHelpId && !ShowsPhysicalHelp) Selection = Phones.Devices.FirstOrDefault()?.Id ?? Avds.FirstOrDefault()?.Id;
+        if (Selection is not { } selection || !selection.StartsWith("device:") || selection == PhysicalHelpId || SelectedPhysical != null) return;
+        var serial = selection["device:".Length..];
+        if (Phones.Devices.FirstOrDefault(d => d.Serials.Contains(serial)) is { } device) Selection = device.Id;
+    }
+
+    public void Mirror(PhysicalDevice device) => Phones.Mirror(device.Id, sessions.Count + Phones.Sessions.Count);
     public IReadOnlyList<DeviceSession> RunningSessions => sessions.Values.ToList();
 
     public AvdStatus Status(Avd avd)
@@ -678,8 +708,9 @@ sealed class DeviceManager
 
     // Quitting
 
-    public bool HasSessions => sessions.Count > 0 || starting.Count > 0;
+    public bool HasSessions => sessions.Count > 0 || starting.Count > 0 || Phones.HasWork;
 
-    /// Shuts every device down, saving snapshots; the task ends once all emulators have exited.
-    public Task StopAllSessions() => DeviceSession.StopAll(sessions.Values.ToList());
+    /// Shuts every device down, saving snapshots, and finishes the phones' recordings; the task ends once all
+    /// emulators have exited and the files are complete.
+    public Task StopAllSessions() => Task.WhenAll(Phones.StopAll(), DeviceSession.StopAll(sessions.Values.ToList()));
 }

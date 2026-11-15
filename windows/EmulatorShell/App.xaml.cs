@@ -22,7 +22,16 @@ public partial class App : Application
         InitializeComponent();
         // The app ends when it decides to: device windows are hidden while their emulators save snapshots.
         DispatcherShutdownMode = DispatcherShutdownMode.OnExplicitShutdown;
-        UnhandledException += (_, e) => Log.Error($"unhandled: {e.Exception}");
+        // An error in one handler on the UI thread is logged (with XAML's message, which often carries the original
+        // stack where the exception has lost it) and the app carries on: it runs for days in the notification area,
+        // and ending it would take every device window and recording with it.
+        UnhandledException += (_, e) =>
+        {
+            Log.Error($"unhandled: {e.Message}\n{e.Exception}");
+            e.Handled = true;
+        };
+        // Off the UI thread too: the streams of physical devices run on threads of their own.
+        AppDomain.CurrentDomain.UnhandledException += (_, e) => Log.Error($"unhandled on a background thread: {e.ExceptionObject}");
         // An icon Explorer is not told to remove stays in the notification area until the pointer passes over it.
         AppDomain.CurrentDomain.ProcessExit += (_, _) => tray?.Dispose();
     }
@@ -94,7 +103,7 @@ public partial class App : Application
     /// The manager, then every AVD with what choosing it does, then quitting.
     private List<TrayMenuItem> TrayMenu()
     {
-        var items = new List<TrayMenuItem> { new("模拟器管理器", ShowManager, IsDefault: true) };
+        var items = new List<TrayMenuItem> { new("设备管理器", ShowManager, IsDefault: true) };
         if (manager == null) return items;
         if (manager.Avds.Count > 0) items.Add(TrayMenuItem.Separator);
         foreach (var avd in manager.Avds)

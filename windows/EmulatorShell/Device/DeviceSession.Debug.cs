@@ -10,7 +10,8 @@ namespace EmulatorShell;
 /// `title on|off`,
 /// `resize <corner 0-3> <dx> <dy>` (pixels, in 10 steps), `key <W3C name>`, `text <text>`, `touch <x> <y>`,
 /// `swipe <x1> <y1> <x2> <y2>` (device pixels),
-/// `screenshot`, `more`, `menu`, `move <dx> <dy>`, `shot <name>` (a marker for a screen capture), `quit`.
+/// `screenshot`, `more`, `menu`, `move <dx> <dy>`, `shot <name>` (a marker for a screen capture), `quit`. A physical
+/// device's window runs the script once its stream starts; `text`, `touch` and `swipe` then go through scrcpy.
 sealed partial class DeviceSession
 {
     partial void RunTestScript()
@@ -49,7 +50,15 @@ sealed partial class DeviceSession
                     }
                     case "title": chrome?.HoldTitleBar(argument == "on"); break;
                     case "key": Run(new DeviceCommand.Key(argument)); break;
+                    case "text" when physical != null: TypeOnDevice(argument); break;
                     case "text": Enqueue(c => c.SendText(argument)); break;
+                    case "touch" when physical != null:
+                    {
+                        var xy = argument.Split(' ').Select(double.Parse).ToArray();
+                        PhysicalTouch(new Point(xy[0], xy[1]), true);
+                        PhysicalTouch(new Point(xy[0], xy[1]), false);
+                        break;
+                    }
                     case "touch":
                     {
                         var xy = argument.Split(' ').Select(double.Parse).ToArray();
@@ -63,10 +72,12 @@ sealed partial class DeviceSession
                         for (var i = 0; i <= 10; i++)
                         {
                             int x = (int)(p[0] + (p[2] - p[0]) * i / 10), y = (int)(p[1] + (p[3] - p[1]) * i / 10);
-                            Enqueue(c => c.SendTouch(x, y, true));
+                            if (physical != null) PhysicalTouch(new Point(x, y), true);
+                            else Enqueue(c => c.SendTouch(x, y, true));
                             await Task.Delay(25);
                         }
-                        Enqueue(c => c.SendTouch((int)p[2], (int)p[3], false));
+                        if (physical != null) PhysicalTouch(new Point(p[2], p[3]), false);
+                        else Enqueue(c => c.SendTouch((int)p[2], (int)p[3], false));
                         break;
                     }
                     case "screenshot": Perform(DeviceAction.Screenshot); break;

@@ -30,6 +30,11 @@
   <ItemGroup>
     <PackageReference Include="Microsoft.WindowsAppSDK" Version="1.8.260921001" />
     <PackageReference Include="Microsoft.Graphics.Win2D" Version="1.4.0" />
+    <!-- Physical devices: Media Foundation for the H.264 stream (decoding, and encoding recordings), WASAPI for
+         their sound, and the Wi-Fi pairing QR code. All MIT. -->
+    <PackageReference Include="Vortice.MediaFoundation" Version="3.6.2" />
+    <PackageReference Include="NAudio.Wasapi" Version="2.2.1" />
+    <PackageReference Include="QRCoder" Version="1.6.0" />
   </ItemGroup>
 
   <ItemGroup>
@@ -38,6 +43,9 @@
 
   <ItemGroup>
     <Content Include="Assets\**" CopyToOutputDirectory="PreserveNewest" />
+    <!-- The device side of mirroring physical devices (scrcpy-server, Apache 2.0), with its license. -->
+    <Content Include="..\..\vendor\scrcpy\scrcpy-server" Link="scrcpy-server" CopyToOutputDirectory="PreserveNewest" />
+    <Content Include="..\..\vendor\scrcpy\LICENSE" Link="scrcpy-LICENSE" CopyToOutputDirectory="PreserveNewest" />
   </ItemGroup>
 
   <!-- The SDK forwarder (windows\Forwarder) ships next to the app, which copies it into the SDK when asked. -->

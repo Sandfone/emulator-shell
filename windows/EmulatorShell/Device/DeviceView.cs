@@ -28,6 +28,20 @@ sealed partial class DeviceView : Grid
     public event Action? DragRequested;
     /// The window moved to a monitor of another scale; the visuals have been drawn again for it.
     public event Action? RasterScaleChanged;
+    /// The wheel turned over the screen, at a device pixel, by notches (positive: right / away from the user);
+    /// unset, the wheel does nothing.
+    public event Action<Point, double, double>? Scroll;
+    private Action<IReadOnlyList<string>>? filesDropped;
+    /// Files dropped on the device; set, the view accepts file drags.
+    public Action<IReadOnlyList<string>>? FilesDropped
+    {
+        get => filesDropped;
+        set
+        {
+            filesDropped = value;
+            AllowDrop = value != null;
+        }
+    }
     /// The rasterization scale the visuals were last drawn at.
     private double drawnScale;
 
@@ -176,7 +190,32 @@ sealed partial class DeviceView : Grid
         PointerCanceled += OnPointerReleased;
         PointerCaptureLost += OnPointerCaptureLost;
         PointerExited += (_, _) => { if (pressedButton == null) Highlight(null); };
+        PointerWheelChanged += OnPointerWheelChanged;
+        DragOver += (_, e) =>
+        {
+            if (filesDropped != null && e.DataView.Contains(Windows.ApplicationModel.DataTransfer.StandardDataFormats.StorageItems))
+                e.AcceptedOperation = Windows.ApplicationModel.DataTransfer.DataPackageOperation.Copy;
+        };
+        Drop += async (_, e) =>
+        {
+            if (filesDropped is not { } dropped || !e.DataView.Contains(Windows.ApplicationModel.DataTransfer.StandardDataFormats.StorageItems)) return;
+            var items = await e.DataView.GetStorageItemsAsync();
+            var paths = items.OfType<Windows.Storage.StorageFile>().Select(f => f.Path).Where(p => p.Length > 0).ToList();
+            if (paths.Count > 0) dropped(paths);
+        };
         ApplyTransform();
+    }
+
+    private void OnPointerWheelChanged(object sender, PointerRoutedEventArgs e)
+    {
+        if (Scroll == null) return;
+        var point = e.GetCurrentPoint(this);
+        var local = LocalPoint(point.Position);
+        if (!DisplayRect.Contains(local)) return;
+        e.Handled = true;
+        var notches = point.Properties.MouseWheelDelta / 120.0;
+        if (point.Properties.IsHorizontalMouseWheel) Scroll(DevicePoint(local), -notches, 0);
+        else Scroll(DevicePoint(local), 0, notches);
     }
 
     public DeviceSkin Skin => skin;
@@ -363,17 +402,18 @@ sealed partial class DeviceView : Grid
     /// While set, frames are not shown: the view keeps its last one, e.g. until a fold animation takes over.
     public bool FreezesFrames { get; set; }
 
-    /// Draws a frame (RGBA, upright for the viewer at `rotation` quarter turns) into the screen.
-    public void Show(byte[] pixels, int width, int height, int rotation)
+    /// Draws a frame (RGBA, or BGRA with `bgra`, upright for the viewer at `rotation` quarter turns) into the screen.
+    public void Show(byte[] pixels, int width, int height, int rotation, bool bgra = false)
     {
         if (FreezesFrames || screenSurface == null) return;
         try
         {
-            if (frameBitmap == null || frameBitmap.SizeInPixels.Width != width || frameBitmap.SizeInPixels.Height != height)
+            var format = bgra ? DirectXPixelFormat.B8G8R8A8UIntNormalized : DirectXPixelFormat.R8G8B8A8UIntNormalized;
+            if (frameBitmap == null || frameBitmap.SizeInPixels.Width != width || frameBitmap.SizeInPixels.Height != height || frameBitmap.Format != format)
             {
                 frameBitmap?.Dispose();
-                frameBitmap = CanvasBitmap.CreateFromBytes(DeviceSkin.Device, pixels, width, height,
-                                                           DirectXPixelFormat.R8G8B8A8UIntNormalized, 96, CanvasAlphaMode.Ignore);
+                frameBitmap = CanvasBitmap.CreateFromBytes(DeviceSkin.Device, pixels.AsSpan(0, width * height * 4).ToArray(), width, height,
+                                                           format, 96, CanvasAlphaMode.Ignore);
             }
             else
             {

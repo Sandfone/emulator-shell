@@ -137,7 +137,7 @@ sealed partial class MorePanel : UserControl
         return grid;
     }
 
-    private static Button Tile(string glyph, string title, string status, bool isOn, bool enabled, Action action)
+    internal static Button Tile(string glyph, string title, string status, bool isOn, bool enabled, Action action)
     {
         var accent = (Brush)Application.Current.Resources["AccentFillColorDefaultBrush"];
         var circle = new Border

@@ -2,7 +2,7 @@ using System.Runtime.InteropServices;
 
 namespace EmulatorShell;
 
-/// The menu a right click on the app's taskbar button shows: a "模拟器管理器" task and a "设备" category with each
+/// The menu a right click on the app's taskbar button shows: a "设备管理器" task and a "设备" category with each
 /// AVD, which start this app without arguments or with the AVD's name, as the Start menu and the SDK forwarder do.
 ///
 /// Built with the shell's ICustomDestinationList, called through its vtable: the app registers CsWinRT's
@@ -35,7 +35,7 @@ static unsafe class JumpList
             Check(Call<uint, Guid, nint>(list, 4, &slots, &arrayIid, &removed), "BeginList");
 
             tasks = Create(CLSID_EnumerableObjectCollection, IID_IObjectCollection);
-            AddLink(tasks, exe, "", "模拟器管理器", "打开 Emulator Shell 的设备管理器");
+            AddLink(tasks, exe, "", "设备管理器", "打开 Emulator Shell 的设备管理器");
             Check(Call(list, 7, QueryArray(tasks)), "AddUserTasks");
 
             if (avds.Count > 0)

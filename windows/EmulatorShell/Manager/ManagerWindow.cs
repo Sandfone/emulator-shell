@@ -11,7 +11,8 @@ using Windows.UI;
 
 namespace EmulatorShell;
 
-/// The device manager window: AVDs grouped by category on the left, the selected one's details on the right.
+/// The device manager window: phones and tablets connected over USB or Wi-Fi, then AVDs grouped by category on the
+/// left, the selected one's details on the right.
 sealed partial class ManagerWindow : Window
 {
     /// The dialog showing, for the debug test script.
@@ -39,7 +40,7 @@ sealed partial class ManagerWindow : Window
     {
         this.manager = manager;
         previewTimer = new DispatcherQueueTimerHolder(this);
-        Title = "模拟器";
+        Title = "设备";
         SystemBackdrop = new Microsoft.UI.Xaml.Media.MicaBackdrop();
         ExtendsContentIntoTitleBar = true;
         AppWindow.TitleBar.PreferredHeightOption = TitleBarHeightOption.Tall;
@@ -53,9 +54,16 @@ sealed partial class ManagerWindow : Window
             Children =
             {
                 new Image { Source = new Microsoft.UI.Xaml.Media.Imaging.BitmapImage(new Uri(Path.Combine(AppContext.BaseDirectory, "Assets", "AppIcon.png"))), Width = 18, Height = 18 },
-                new TextBlock { Text = "模拟器", Style = (Style)Application.Current.Resources["CaptionTextBlockStyle"], VerticalAlignment = VerticalAlignment.Center },
+                new TextBlock { Text = "设备", Style = (Style)Application.Current.Resources["CaptionTextBlockStyle"], VerticalAlignment = VerticalAlignment.Center },
             },
         });
+        var pairing = new Button
+        {
+            Content = new StackPanel { Orientation = Orientation.Horizontal, Spacing = 8, Children = { new FontIcon { Glyph = "\uE701", FontSize = 14 }, new TextBlock { Text = "Wi-Fi 配对" } } },
+            Margin = new Thickness(0, 0, 6, 0),
+        };
+        ToolTipService.SetToolTip(pairing, "通过 Wi-Fi 配对 Android 11 及以上的设备  Ctrl+Shift+N");
+        pairing.Click += (_, _) => _ = ShowPairing();
         var images = new Button
         {
             Content = new StackPanel { Orientation = Orientation.Horizontal, Spacing = 8, Children = { new FontIcon { Glyph = "", FontSize = 14 }, new TextBlock { Text = "系统镜像" } } },
@@ -71,7 +79,7 @@ sealed partial class ManagerWindow : Window
         titleBar.ColumnDefinitions.Add(new ColumnDefinition { Width = GridLength.Auto });
         titleBar.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(146) });
         titleBar.Children.Add(dragArea);
-        var toolbar = new StackPanel { Orientation = Orientation.Horizontal, VerticalAlignment = VerticalAlignment.Center, Children = { images, more } };
+        var toolbar = new StackPanel { Orientation = Orientation.Horizontal, VerticalAlignment = VerticalAlignment.Center, Children = { pairing, images, more } };
         Grid.SetColumn(toolbar, 1);
         titleBar.Children.Add(toolbar);
         SetTitleBar(dragArea);
@@ -105,6 +113,11 @@ sealed partial class ManagerWindow : Window
         };
         list.DoubleTapped += (_, _) =>
         {
+            if (manager.SelectedPhysical is { IsOnline: true } phone)
+            {
+                manager.Mirror(phone);
+                return;
+            }
             if (manager.SelectedAvd is not { } avd) return;
             if (manager.Status(avd).IsStopped) manager.Start(avd); else manager.ShowWindow(avd);
         };
@@ -122,7 +135,7 @@ sealed partial class ManagerWindow : Window
             BorderBrush = (Brush)Application.Current.Resources["CardStrokeColorDefaultBrush"],
             BorderThickness = new Thickness(1, 1, 0, 0),
             CornerRadius = new CornerRadius(8, 0, 0, 0),
-            Child = detail,
+            Child = new Grid { Children = { detail, toastHost } },
         };
         var body = new Grid();
         body.ColumnDefinitions.Add(new ColumnDefinition { Width = GridLength.Auto });
@@ -144,8 +157,19 @@ sealed partial class ManagerWindow : Window
         }));
         root.KeyboardAccelerators.Add(Accelerator(VirtualKey.O, () =>
         {
-            if (manager.SelectedAvd is { } avd) manager.Start(avd);
+            if (manager.SelectedPhysical is { IsOnline: true } phone) manager.Mirror(phone);
+            else if (manager.SelectedAvd is { } avd) manager.Start(avd);
         }));
+        // In the manager, screenshots and recording work on the selected phone.
+        root.KeyboardAccelerators.Add(Accelerator(VirtualKey.S, () =>
+        {
+            if (manager.SelectedPhysical is { IsOnline: true } phone) manager.Phones.Screenshot(phone.Id);
+        }));
+        root.KeyboardAccelerators.Add(Accelerator(VirtualKey.R, () =>
+        {
+            if (manager.SelectedPhysical is { IsOnline: true } phone) manager.Phones.ToggleRecording(phone.Id);
+        }, shift: true));
+        root.KeyboardAccelerators.Add(Accelerator(VirtualKey.N, () => _ = ShowPairing(), shift: true));
         root.KeyboardAccelerators.Add(Accelerator(VirtualKey.Delete, () =>
         {
             if (manager.SelectedAvd is { } avd && manager.Status(avd).IsStopped) _ = ConfirmDelete(avd);
@@ -173,6 +197,7 @@ sealed partial class ManagerWindow : Window
             presenter.PreferredMinimumHeight = 560;
         }
         RestorePlacement();
+        StartPhysical();
         Render();
         RunTestScript();
     }
@@ -180,9 +205,9 @@ sealed partial class ManagerWindow : Window
     /// See ManagerWindow.Debug.cs.
     partial void RunTestScript();
 
-    private static KeyboardAccelerator Accelerator(VirtualKey key, Action action)
+    private static KeyboardAccelerator Accelerator(VirtualKey key, Action action, bool shift = false)
     {
-        var accelerator = new KeyboardAccelerator { Key = key, Modifiers = VirtualKeyModifiers.Control };
+        var accelerator = new KeyboardAccelerator { Key = key, Modifiers = VirtualKeyModifiers.Control | (shift ? VirtualKeyModifiers.Shift : 0) };
         accelerator.Invoked += (_, e) =>
         {
             e.Handled = true;
@@ -221,6 +246,7 @@ sealed partial class ManagerWindow : Window
     {
         RebuildSidebar(force: false);
         RebuildDetail();
+        UpdateToast();
     }
 
     // Sidebar
@@ -240,12 +266,13 @@ sealed partial class ManagerWindow : Window
     private void RebuildSidebar(bool force)
     {
         var sections = Sections;
-        var signature = string.Join("|", sections.SelectMany(s => s.Avds.Select(a => $"{s.Category}:{a.Id}:{a.Name}:{Subtitle(a)}:{manager.Status(a)}")))
+        var signature = PhysicalSignature + "/" + string.Join("|", sections.SelectMany(s => s.Avds.Select(a => $"{s.Category}:{a.Id}:{a.Name}:{Subtitle(a)}:{manager.Status(a)}")))
                         + "#" + manager.Selection;
         if (!force && signature == sidebarSignature) return;
         sidebarSignature = signature;
         updatingList = true;
         list.Items.Clear();
+        AddPhysicalItems();
         foreach (var (category, avds) in sections)
         {
             list.Items.Add(new ListViewItem
@@ -265,7 +292,7 @@ sealed partial class ManagerWindow : Window
         }
         updatingList = false;
         emptyFilter.Text = $"没有名称包含“{filter.Text}”的模拟器";
-        emptyFilter.Visibility = filter.Text.Length > 0 && sections.Count == 0 && manager.Avds.Count > 0 ? Visibility.Visible : Visibility.Collapsed;
+        emptyFilter.Visibility = filter.Text.Length > 0 && sections.Count == 0 && VisiblePhones.Count == 0 && manager.Avds.Count > 0 ? Visibility.Visible : Visibility.Collapsed;
         removeButton.IsEnabled = manager.SelectedAvd is { } selected && manager.Status(selected).IsStopped;
     }
 
@@ -355,6 +382,19 @@ sealed partial class ManagerWindow : Window
 
     private void RebuildDetail()
     {
+        if (manager.Selection?.StartsWith("device:") == true)
+        {
+            var physicalSignature = PhysicalDetailSignature;
+            if (physicalSignature == detailSignature) return;
+            detailSignature = physicalSignature;
+            detail.Children.Clear();
+            livePreview = null;
+            previewTimer.Stop();
+            RebuildPhysicalDetail();
+            return;
+        }
+        StopPreview();
+        detailClocks.Clear();
         var avd = manager.SelectedAvd;
         var status = avd == null ? null : manager.Status(avd);
         var signature = avd == null ? $"none:{manager.Avds.Count}"
@@ -623,12 +663,15 @@ sealed partial class ManagerWindow : Window
 
     // Dialogs
 
-    /// One dialog at a time, as ContentDialog requires; later ones wait their turn.
+    /// One dialog at a time, as ContentDialog requires; later ones wait their turn. A dialog asked for while the
+    /// window is still opening (checking the forwarder at launch) waits for its content to load: without a XamlRoot
+    /// ShowAsync throws, and the app would end.
     public async Task<ContentDialogResult> ShowDialog(ContentDialog dialog)
     {
         await dialogs.WaitAsync();
         try
         {
+            await ContentLoaded();
             dialog.XamlRoot = Content.XamlRoot;
             dialog.RequestedTheme = ((FrameworkElement)Content).ActualTheme;
             currentDialog = dialog;
@@ -639,6 +682,20 @@ sealed partial class ManagerWindow : Window
             currentDialog = null;
             dialogs.Release();
         }
+    }
+
+    private Task ContentLoaded()
+    {
+        if (Content.XamlRoot != null) return Task.CompletedTask;
+        var loaded = new TaskCompletionSource();
+        var content = (FrameworkElement)Content;
+        void Loaded(object sender, RoutedEventArgs e)
+        {
+            content.Loaded -= Loaded;
+            loaded.TrySetResult();
+        }
+        content.Loaded += Loaded;
+        return loaded.Task;
     }
 
     private Task Alert(string title, string message) =>
@@ -753,20 +810,10 @@ sealed partial class ManagerWindow : Window
     }
 
     /// What a device window's menu asked for, once the window can show dialogs.
-    public void Run(ManagerTask task)
+    public async void Run(ManagerTask task)
     {
         if (task == ManagerTask.Show) return;
-        if (Content.XamlRoot == null)
-        {
-            var content = (FrameworkElement)Content;
-            void Loaded(object sender, RoutedEventArgs e)
-            {
-                content.Loaded -= Loaded;
-                Run(task);
-            }
-            content.Loaded += Loaded;
-            return;
-        }
+        await ContentLoaded();
         _ = task == ManagerTask.ToggleForwarder ? ToggleForwarder() : ToggleCommand();
     }
 

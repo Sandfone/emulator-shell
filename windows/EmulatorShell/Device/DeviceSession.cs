@@ -25,7 +25,8 @@ abstract record DeviceCommand
     public static readonly (string Title, DeviceCommand Command, string Shortcut)[][] MenuGroups =
     [
         [("返回", new Key("GoBack"), "Ctrl+B"), ("主屏幕", new Key("GoHome"), "Ctrl+Shift+H"), ("最近任务", new Key("AppSwitch"), "Ctrl+Shift+O")],
-        [("截图", new Do(DeviceAction.Screenshot), "Ctrl+S"), ("向左旋转", new Do(DeviceAction.RotateLeft), "Ctrl+←"),
+        [("截图", new Do(DeviceAction.Screenshot), "Ctrl+S"), ("开始或停止录屏", new Do(DeviceAction.Record), "Ctrl+Shift+R"),
+         ("向左旋转", new Do(DeviceAction.RotateLeft), "Ctrl+←"),
          ("向右旋转", new Do(DeviceAction.RotateRight), "Ctrl+→"), ("折叠 / 展开", new Do(DeviceAction.ToggleFold), "Ctrl+Shift+F")],
         [("音量 −", new Key("AudioVolumeDown"), "Ctrl+Alt+↓"), ("音量 +", new Key("AudioVolumeUp"), "Ctrl+Alt+↑"), ("电源", new Key("Power"), "Ctrl+L")],
     ];
@@ -207,6 +208,12 @@ sealed partial class DeviceSession
     /// window closes, and the exit ends this session.
     public void Stop()
     {
+        // A phone keeps running; its window only lets go of it.
+        if (physical != null)
+        {
+            TearDown();
+            return;
+        }
         if (State is not (SessionState.Booting or SessionState.Running)) return;
         State = SessionState.Stopping;
         Window?.Hide();
@@ -222,7 +229,7 @@ sealed partial class DeviceSession
     /// Closing the window: shuts down a device this app started, only lets go of one it is just showing.
     public void Close()
     {
-        if (Attached != null) TearDown(); else Stop();
+        if (Attached != null || physical != null) TearDown(); else Stop();
     }
 
     /// For quitting: every device window goes away at once and the emulators save their snapshots in
@@ -269,6 +276,9 @@ sealed partial class DeviceSession
     {
         switch (command)
         {
+            case DeviceCommand.Key key when physical != null:
+                if (AndroidKey.Code(key.Name) is { } code) TapKey(code);
+                break;
             case DeviceCommand.Key key: Enqueue(c => c.SendKey(key.Name)); break;
             case DeviceCommand.Do action: Perform(action.Action); break;
         }
@@ -317,7 +327,7 @@ sealed partial class DeviceSession
         }
         window.SetBox(DeviceWindow.Fitted(frame, screen));
 
-        var chrome = new DeviceChrome(window, Avd.Name, Subtitle(skin), closedSkin != null);
+        var chrome = new DeviceChrome(window, Avd.Name, Subtitle(skin), closedSkin != null, physical: physical != null);
         chrome.Key += SendKey;
         chrome.Action += Perform;
         chrome.MenuProvider = MakeMenu;
@@ -336,6 +346,11 @@ sealed partial class DeviceSession
 
         view.Touch += (point, pressed) =>
         {
+            if (physical != null)
+            {
+                PhysicalTouch(point, pressed);
+                return;
+            }
             var touch = TouchPoint(point);
             Log.Debug($"touch {(pressed ? "down" : "up")} at {(int)touch.X},{(int)touch.Y}");
             Enqueue(c => c.SendTouch((int)touch.X, (int)touch.Y, pressed));
@@ -369,6 +384,7 @@ sealed partial class DeviceSession
     private string Subtitle(DeviceSkin skin)
     {
         var resolution = $"{(int)skin.Resolution.Width} × {(int)skin.Resolution.Height}";
+        if (physical?.Info is { } info) return $"Android {info.AndroidVersion} · {resolution}";
         var folder = Avd.Sysdir?.Split('/', '\\').FirstOrDefault(p => p.StartsWith("android-"));
         return folder == null ? resolution : $"API {folder["android-".Length..]} · {resolution}";
     }
@@ -385,7 +401,7 @@ sealed partial class DeviceSession
             return item;
         }
 
-        menu.Items.Add(Item("模拟器管理器", "Ctrl+Shift+2", () => ManagerRequested?.Invoke(ManagerTask.Show)));
+        menu.Items.Add(Item("设备管理器", "Ctrl+Shift+2", () => ManagerRequested?.Invoke(ManagerTask.Show)));
         menu.Items.Add(new MenuFlyoutSeparator());
 
         var running = State == SessionState.Running;
@@ -443,6 +459,7 @@ sealed partial class DeviceSession
             (VirtualKey.H, true, false) => new DeviceCommand.Key("GoHome"),
             (VirtualKey.O, true, false) => new DeviceCommand.Key("AppSwitch"),
             (VirtualKey.S, false, false) => new DeviceCommand.Do(DeviceAction.Screenshot),
+            (VirtualKey.R, true, false) => new DeviceCommand.Do(DeviceAction.Record),
             (VirtualKey.Left, false, false) => new DeviceCommand.Do(DeviceAction.RotateLeft),
             (VirtualKey.Right, false, false) => new DeviceCommand.Do(DeviceAction.RotateRight),
             (VirtualKey.F, true, false) => new DeviceCommand.Do(DeviceAction.ToggleFold),
@@ -490,6 +507,10 @@ sealed partial class DeviceSession
                 e.Handled = true;
                 QuitRequested?.Invoke();
                 break;
+            case (VirtualKey.V, false, false) when physical != null:
+                e.Handled = true;
+                PastePhysical();
+                break;
         }
     }
 
@@ -497,7 +518,8 @@ sealed partial class DeviceSession
     {
         if (KeyMapping.Special(e.Key, IsDown(VirtualKey.Control), IsDown(VirtualKey.Menu)) is not { } key) return;
         e.Handled = true;
-        Enqueue(c => c.SendKey(key));
+        if (physical != null) PhysicalKey(key);
+        else Enqueue(c => c.SendKey(key));
     }
 
     private char? highSurrogate;
@@ -516,6 +538,12 @@ sealed partial class DeviceSession
         highSurrogate = null;
         e.Handled = true;
         var (key, typed) = KeyMapping.Character(text);
+        if (physical != null)
+        {
+            if (key != null) PhysicalKey(key);
+            else if (typed != null) TypeOnDevice(typed);
+            return;
+        }
         if (key != null) Enqueue(c => c.SendKey(key));
         else if (typed != null) Enqueue(c => c.SendText(typed));
     }
@@ -893,6 +921,7 @@ sealed partial class DeviceSession
         if (State == SessionState.Stopped) return;
         exitWatch?.Dispose();
         exitWatch = null;
+        TearDownPhysical();
         lifetime.Cancel();
         streamCancellation?.Cancel();
         postureCancellation?.Cancel();
@@ -1003,6 +1032,11 @@ sealed partial class DeviceSession
     private void SendKey(string key, bool pressed)
     {
         Log.Debug($"key {key} {(pressed ? "down" : "up")}");
+        if (physical != null)
+        {
+            if (AndroidKey.Code(key) is { } code) physical.Stream.InjectKey(code, pressed ? ScrcpyStream.KeyAction.Down : ScrcpyStream.KeyAction.Up);
+            return;
+        }
         Enqueue(c => c.SendKey(key, pressed ? KeyboardEvent.Types.KeyEventType.Keydown : KeyboardEvent.Types.KeyEventType.Keyup));
     }
 
@@ -1012,16 +1046,24 @@ sealed partial class DeviceSession
         {
             case DeviceAction.Close: Close(); break;
             case DeviceAction.Minimize: Window?.Minimize(); break;
+            case DeviceAction.Screenshot when physical != null: PhysicalScreenshot(); break;
             case DeviceAction.Screenshot: TakeScreenshot(); break;
+            case DeviceAction.Record when physical != null: physical.Store.ToggleRecording(physical.Id); break;
             case DeviceAction.RotateLeft: Rotate(1); break;
             case DeviceAction.RotateRight: Rotate(-1); break;
             case DeviceAction.ToggleFold: ToggleFold(); break;
         }
     }
 
-    /// Whether `command` applies to this device: folding only to a foldable with a closed skin.
-    public bool IsAvailable(DeviceCommand command) =>
-        command is not DeviceCommand.Do { Action: DeviceAction.ToggleFold } || closedSkin != null;
+    /// Whether `command` applies to this device: folding only to a foldable with a closed skin; a phone turns when
+    /// it is turned, and recording is for phones for now.
+    public bool IsAvailable(DeviceCommand command) => command switch
+    {
+        DeviceCommand.Do { Action: DeviceAction.ToggleFold } => closedSkin != null,
+        DeviceCommand.Do { Action: DeviceAction.RotateLeft or DeviceAction.RotateRight } => physical == null,
+        DeviceCommand.Do { Action: DeviceAction.Record } => physical != null,
+        _ => true,
+    };
 
     /// Folds an open foldable shut or opens a closed one; the posture notification then plays the animation.
     private void ToggleFold()

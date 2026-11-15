@@ -441,6 +441,29 @@ without it `dotnet publish` leaves out the app's `.pri`, and the manager fails t
   list, `emulator-shell`) asks that copy, over a named pipe, to show its manager instead of opening another.
 - **Dragging** the frame or a bar moves the window with the pointer on every frame. The system's move loop
   (`WM_NCLBUTTONDOWN` on the caption), started from a XAML press, moved it by amounts unrelated to the pointer's.
+- **Physical devices** work as on macOS (see Physical devices), with Windows' own parts:
+  - The device list follows `adb track-devices` from when the manager (or something else that shows phones) opens:
+    a copy of the app opened for one emulator runs no tracker of its own. adb on Windows writes "\r\n" where each
+    report's length counts "\n", so the "\r"s are dropped before the reports are split; a report that still does
+    not start with a length starts a new tracker.
+  - The 物理设备 section is shown only while it lists a device; pairing is in the toolbar. Without platform-tools a
+    single row offers to install them. A selected phone that goes away leaves "设备已断开" in the pane until it
+    comes back.
+  - The H.264 stream is decoded with Windows' Media Foundation H.264 decoder in low-latency mode, through
+    Vortice.MediaFoundation (MIT); its NV12 frames are turned into BGRA here, rows in parallel, BT.601 or BT.709 as
+    the stream says, and shown like an emulator's frames. The sound plays through WASAPI (NAudio, MIT).
+  - Recordings are written with Media Foundation's sink writer, H.264 and AAC in MP4, with Windows' software H.264
+    encoder: NVIDIA's hardware encoder MFT ended the whole process a few frames into a recording. The writer is made
+    and used on the recorder's own thread, in the multithreaded apartment.
+  - `screencap` output is searched for the PNG it holds: a foldable prints a warning about its displays first.
+  - Besides `persist.security.adbinput`, which HyperOS 2 does not set, a server log line saying an injected event
+    was refused (`INJECT_EVENTS`) marks the device as refusing input, for the window's reminder and the pane's warning.
+  - Keys: Alt-drag pinches, the wheel scrolls, Ctrl+V pastes the Windows clipboard on the device, Ctrl+Shift+R
+    records (in the window, or for the phone selected in the manager), Ctrl+S takes a screenshot there too, and
+    Ctrl+Shift+N opens Wi-Fi pairing; its QR code is drawn with QRCoder (MIT). Text typed through the device's
+    clipboard (Chinese, emoji) is not copied back to the Windows clipboard.
+  - Screenshots and recordings go to the Desktop, as on macOS; `scrcpy-server` and its license are copied next to the
+    app (and into the installer).
 - **Files**: settings in `%LOCALAPPDATA%\EmulatorShell\settings.json`; emulator output in
   `%LOCALAPPDATA%\EmulatorShell\Logs\emulator-<avd>.log`; running emulators are found through
   `%TEMP%\avd\running\pid_*.ini`. System images listed are the host's ABI (`x86_64`, or `arm64-v8a` on ARM).
@@ -452,10 +475,16 @@ without it `dotnet publish` leaves out the app's `.pri`, and the manager fails t
 - **Command-line tool**: `emulator-shell.cmd` in `%LOCALAPPDATA%\Microsoft\WindowsApps`, which is on the PATH.
 - **Quitting** ends the app once the manager and every device window are closed; the emulators finish saving
   their snapshots in the background first.
+- **Errors** are also written to `%LOCALAPPDATA%\EmulatorShell\Logs\emulator-shell.log`. An unexpected error
+  on the UI thread is logged there with its stack and the app carries on, rather than ending and taking the
+  device windows and recordings with it.
 
 Debug builds read `EMULATOR_SHELL_TEST_SCRIPT` (device windows) and `EMULATOR_SHELL_MANAGER_SCRIPT` (the
 manager): `;`-separated commands such as `rotate right`, `fold`, `resize 2 200 300`, `more`, `new`, `images`,
-for checking the windows without driving the mouse (see `DeviceSession.Debug.cs` and `ManagerWindow.Debug.cs`).
+`mirror device:<serial>`, `record device:<serial>`, `pairing`, `theme dark` or `fail`, for checking the windows without driving the mouse
+(see `DeviceSession.Debug.cs` and `ManagerWindow.Debug.cs`); the manager's `shot <name>` also saves the window as
+drawn to `%TEMP%\<name>.png`. With `EMULATOR_SHELL_MIRROR_EMULATORS=1` running emulators are listed among the
+physical devices, as on macOS.
 
 Known issues, both in the Windows emulator (36.3.10) and recovered by a cold boot (the manager's ⋯ menu):
 
