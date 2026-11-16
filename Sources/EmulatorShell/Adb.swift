@@ -72,12 +72,14 @@ enum Adb {
     /// The device's screen as PNG, at its own resolution.
     static func screenshotPNG(serial: String) async throws -> Data {
         let data = try await run(["exec-out", "screencap", "-p"], serial: serial, timeout: .seconds(20))
-        // A PNG starts with 0x89 'P' 'N' 'G'; anything else is an error message.
-        guard data.count > 8, data.starts(with: [0x89, 0x50, 0x4E, 0x47]) else {
+        // A PNG starts with 0x89 'P' 'N' 'G' '\r' '\n'. A device with several displays (a foldable) writes a warning
+        // line before it; anything without one is an error message.
+        guard let start = data.firstRange(of: Data([0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A]))?.lowerBound,
+              data.endIndex - start > 8 else {
             let message = String(decoding: data.prefix(200), as: UTF8.self).trimmingCharacters(in: .whitespacesAndNewlines)
             throw ShellError(message.isEmpty ? "截图失败" : message)
         }
-        return data
+        return Data(data[start...])
     }
 
     // MARK: - Wireless

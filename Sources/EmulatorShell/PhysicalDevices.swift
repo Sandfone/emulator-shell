@@ -60,6 +60,8 @@ final class PhysicalDeviceStore {
     private(set) var screensOff: Set<String> = []
     /// Devices with a stream whose sound reaches the Mac.
     private(set) var audioDevices: Set<String> = []
+    /// Devices whose stream reported that they refuse input from adb.
+    private(set) var inputRefused: Set<String> = []
     /// A device being switched to Wi-Fi, reconnected or the like, by id.
     private(set) var busy: Set<String> = []
     var toast: Toast?
@@ -273,6 +275,10 @@ final class PhysicalDeviceStore {
             sessions[id]?.physicalAudioChanged(available)
         }
         stream.onClipboard = { [weak self] text in self?.deviceCopied(text, id: id) }
+        stream.onInputRefused = { [weak self] in
+            guard let self, inputRefused.insert(id).inserted else { return }
+            sessions[id]?.physicalInputRefused()
+        }
         streams[id] = stream
         stream.start()
         updateClipboardTimer()
@@ -336,6 +342,8 @@ final class PhysicalDeviceStore {
         stream.stop()
         screensOff.remove(id)
         audioDevices.remove(id)
+        // A new stream finds out again: the setting may have been turned on meanwhile.
+        inputRefused.remove(id)
         failures[id] = nil
         updateClipboardTimer()
     }

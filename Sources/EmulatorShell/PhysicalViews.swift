@@ -149,6 +149,10 @@ struct PhysicalDetailPane: View {
                 MessageView(symbol: "lock", title: "这台 Mac 不能访问这个 USB 设备",
                             text: "换一根数据线或 USB 口再试。序列号 \(device.serials.first ?? "")")
             }
+        } else if let selection = manager.selection, selection.hasPrefix("device:"), selection != "device:" {
+            // The selected phone went away (unplugged, forgotten); it is selected again if it comes back.
+            MessageView(symbol: "cable.connector.slash", title: "设备已断开",
+                        text: "重新连上后会自动显示在这里。要连接新设备，插上数据线，或点工具栏的“Wi-Fi 配对”。")
         } else {
             ConnectHelpView(manager: manager)
         }
@@ -219,7 +223,7 @@ private struct PhysicalDetail: View {
                         .controlSize(.large)
                         Text("截图和录屏存到桌面 · ⌘S 截图 · ⇧⌘R 开始或停止录屏")
                             .font(.callout).foregroundStyle(.secondary)
-                        if info.inputBlocked {
+                        if info.inputBlocked || phones.inputRefused.contains(device.id) {
                             Label("投屏时能看不能点：这台手机的开发者选项里还没打开“USB 调试（安全设置）”，系统会拒绝来自电脑的点按和输入。截图和录屏不受影响。",
                                   systemImage: "exclamationmark.triangle.fill")
                                 .font(.callout)

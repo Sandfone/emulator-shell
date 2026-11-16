@@ -28,7 +28,8 @@ the bare executable, so window sizes and settings are the same whichever way the
 Quitting (⌘Q) or closing a device window (⌘W) shuts its emulator down the same way as closing the
 emulator's own window, quick-boot snapshot included. The windows go at once; the app finishes
 quitting in the background once every emulator has saved its snapshot (about 10 s for a phone). Several devices can run at once; each gets
-the next free gRPC port from 8554. Emulator output goes to `$TMPDIR/emulator-shell-<avd>.log`.
+the next free gRPC port from 8554. Emulator output goes to `$TMPDIR/emulator-shell-<avd>.log`; the app's own
+errors also go to `~/Library/Logs/EmulatorShell.log` (kept under 1 MB, the previous one as `EmulatorShell.old.log`).
 Set `EMULATOR_SHELL_DEBUG=1` to log touches, keys, foldable postures, changes of the frames' size or
 reported rotation and, every 5 seconds, the frame rate with
 frames the emulator skipped (gaps in `seq`), frames dropped because every display surface was
@@ -317,6 +318,7 @@ they report the same serial number, as some cheap ones do.
 | Unauthorized | How to allow USB debugging on the device; it turns into the above once allowed |
 | Offline | A paired Wi-Fi device away from the network stays listed (remembered in the defaults, `pairedDevices`) with 重新连接 and 忘记此设备 |
 | None connected | A "连接 Android 设备…" row with the steps for USB and a link to Wi-Fi pairing |
+| Gone | A selected device that goes away (unplugged, forgotten) leaves "设备已断开" in the pane, and is shown again when it comes back |
 
 **Wi-Fi pairing** (⇧⌘N or the toolbar, Android 11+) works like Android Studio's: a QR code
 `WIFI:T:ADB;S:<name>;P:<password>;;` that the device scans under Wireless debugging, after which the device
@@ -339,7 +341,8 @@ the rotate buttons are left out. Closing the window only stops mirroring.
   device installs it, other files go to `/sdcard/Download`.
 - MIUI and HyperOS refuse input from adb until "USB debugging (Security settings)" is turned on in the
   developer options (`persist.security.adbinput`); the detail pane says so and the window reminds on
-  the first touch. The screen still streams.
+  the first touch. HyperOS 2 does not set that property, so a server log line saying an injected event was
+  refused (`INJECT_EVENTS`) marks the device too, until its stream next starts. The screen still streams.
 - The window's "More" popover: sound on the Mac or on the device, turning the device's own screen off
   while mirroring, keeping it awake, clipboard sync, showing touches, quality (long side 1280 / 1920 /
   original at 4 / 8 / 16 Mbit/s) and sending files. Options other than the screen are scrcpy start
@@ -348,7 +351,8 @@ the rotate buttons are left out. Closing the window only stops mirroring.
   device with a message; it starts again on its own when the device comes back, on whichever connection.
 
 **Screenshots** (⌘S, in the window or for the device selected in the manager) are `screencap` PNGs at the
-display's resolution, on the Desktop as `<name>_<date>.png`. A black one (an app with `FLAG_SECURE`) is
+display's resolution, on the Desktop as `<name>_<date>.png`; the PNG is searched for in the output, since a
+foldable prints a warning about its displays before it. A black one (an app with `FLAG_SECURE`) is
 not saved.
 
 **Recording** (⇧⌘R, likewise) needs no window: it opens the stream if none runs. The decoded frames are
@@ -447,17 +451,13 @@ without it `dotnet publish` leaves out the app's `.pri`, and the manager fails t
     report's length counts "\n", so the "\r"s are dropped before the reports are split; a report that still does
     not start with a length starts a new tracker.
   - The 物理设备 section is shown only while it lists a device; pairing is in the toolbar. Without platform-tools a
-    single row offers to install them. A selected phone that goes away leaves "设备已断开" in the pane until it
-    comes back.
+    single row offers to install them.
   - The H.264 stream is decoded with Windows' Media Foundation H.264 decoder in low-latency mode, through
     Vortice.MediaFoundation (MIT); its NV12 frames are turned into BGRA here, rows in parallel, BT.601 or BT.709 as
     the stream says, and shown like an emulator's frames. The sound plays through WASAPI (NAudio, MIT).
   - Recordings are written with Media Foundation's sink writer, H.264 and AAC in MP4, with Windows' software H.264
     encoder: NVIDIA's hardware encoder MFT ended the whole process a few frames into a recording. The writer is made
     and used on the recorder's own thread, in the multithreaded apartment.
-  - `screencap` output is searched for the PNG it holds: a foldable prints a warning about its displays first.
-  - Besides `persist.security.adbinput`, which HyperOS 2 does not set, a server log line saying an injected event
-    was refused (`INJECT_EVENTS`) marks the device as refusing input, for the window's reminder and the pane's warning.
   - Keys: Alt-drag pinches, the wheel scrolls, Ctrl+V pastes the Windows clipboard on the device, Ctrl+Shift+R
     records (in the window, or for the phone selected in the manager), Ctrl+S takes a screenshot there too, and
     Ctrl+Shift+N opens Wi-Fi pairing; its QR code is drawn with QRCoder (MIT). Text typed through the device's

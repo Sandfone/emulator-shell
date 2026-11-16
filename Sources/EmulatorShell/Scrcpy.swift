@@ -44,6 +44,8 @@ final class ScrcpyStream {
     /// Whether the device sends its sound: Android 11 and later, with `options.audio`.
     private(set) var hasAudio = false
     var onAudioAvailable: ((Bool) -> Void)?
+    /// The device refused an input event from adb (MIUI and HyperOS until "USB 调试（安全设置）" is on).
+    var onInputRefused: (() -> Void)?
 
     private var connection: ScrcpyConnection?
     private let sinks = ScrcpySinks()
@@ -95,6 +97,8 @@ final class ScrcpyStream {
             onAudioAvailable?(available)
         case let .clipboard(text):
             onClipboard?(text)
+        case .inputRefused:
+            onInputRefused?()
         case let .ended(message):
             connection = nil
             hasAudio = false
@@ -286,6 +290,7 @@ private final class ScrcpyConnection: @unchecked Sendable {
         case videoSize(CGSize)
         case audio(Bool)
         case clipboard(String)
+        case inputRefused
         case ended(String?)
     }
 
@@ -303,6 +308,7 @@ private final class ScrcpyConnection: @unchecked Sendable {
     private let controlQueue = DispatchQueue(label: "scrcpy.control")
     /// The server's last log lines, for the message when it fails.
     private var serverLog: [String] = []
+    private var inputRefused = false
 
     init(serial: String, options: ScrcpyStream.Options, sinks: ScrcpySinks) {
         self.serial = serial
@@ -525,7 +531,12 @@ private final class ScrcpyConnection: @unchecked Sendable {
             self.lock.lock()
             self.serverLog.append(line)
             if self.serverLog.count > 20 { self.serverLog.removeFirst() }
+            // The server says why an injected event failed; HyperOS 2 sets no property that would say so first.
+            let refused = !self.inputRefused
+                && (line.contains("INJECT_EVENTS") || line.contains("USB debugging (Security Settings)"))
+            if refused { self.inputRefused = true }
             self.lock.unlock()
+            if refused { self.onEvent?(.inputRefused) }
         }
         output.fileHandleForReading.readabilityHandler = { collector.append($0.availableData) }
         process.terminationHandler = { [weak self] _ in

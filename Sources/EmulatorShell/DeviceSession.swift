@@ -1407,6 +1407,14 @@ final class DeviceSession {
         physical?.controls?.audioAvailable = available
     }
 
+    /// The device refused an input event: the window says what to turn on, from now on at each touch.
+    func physicalInputRefused() {
+        guard let physical else { return }
+        physical.inputBlocked = true
+        physical.lastInputWarning = .distantPast
+        warnIfInputBlocked()
+    }
+
     func setRecording(since start: Date?) {
         chrome?.setRecording(since: start)
     }
@@ -1495,7 +1503,7 @@ final class DeviceSession {
     }
 
     /// On a Xiaomi device whose developer options block input from adb, says what to turn on; it is read
-    /// again each time, so the warning stops once the setting is on.
+    /// again each time, so the warning stops once the setting is on (MIUI; HyperOS 2 does not set it).
     private func warnIfInputBlocked() {
         guard let physical, physical.inputBlocked, Date().timeIntervalSince(physical.lastInputWarning) > 8 else { return }
         physical.lastInputWarning = Date()
@@ -1566,7 +1574,7 @@ final class PhysicalLink {
         self.store = store
         self.info = info
         self.isWireless = isWireless
-        inputBlocked = info.inputBlocked
+        inputBlocked = info.inputBlocked || store.inputRefused.contains(id)
     }
 }
 

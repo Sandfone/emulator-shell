@@ -350,6 +350,38 @@ enum Log {
 
     static func error(_ message: String) {
         write("[emulator-shell] ERROR \(message)\n")
+        keep(message)
+    }
+
+    /// Errors also go to `~/Library/Logs/EmulatorShell.log` (beside the forwarder's log, and shown by Console):
+    /// the app usually runs without anyone reading its output. Past 1 MB it starts over, the previous file kept
+    /// as `EmulatorShell.old.log`.
+    static let fileURL = FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent("Library/Logs/EmulatorShell.log")
+    private static let fileLock = NSLock()
+    nonisolated(unsafe) private static let fileDateFormatter: DateFormatter = {
+        let formatter = DateFormatter()
+        formatter.dateFormat = "yyyy-MM-dd HH:mm:ss.SSS"
+        return formatter
+    }()
+
+    private static func keep(_ message: String) {
+        fileLock.lock()
+        defer { fileLock.unlock() }
+        let manager = FileManager.default
+        try? manager.createDirectory(at: fileURL.deletingLastPathComponent(), withIntermediateDirectories: true)
+        if let size = (try? manager.attributesOfItem(atPath: fileURL.path))?[.size] as? Int, size > 1024 * 1024 {
+            let old = fileURL.deletingLastPathComponent().appendingPathComponent("EmulatorShell.old.log")
+            try? manager.removeItem(at: old)
+            try? manager.moveItem(at: fileURL, to: old)
+        }
+        let line = "\(fileDateFormatter.string(from: Date())) [\(ProcessInfo.processInfo.processIdentifier)] \(message)\n"
+        if let handle = try? FileHandle(forWritingTo: fileURL) {
+            defer { try? handle.close() }
+            _ = try? handle.seekToEnd()
+            try? handle.write(contentsOf: Data(line.utf8))
+        } else {
+            try? Data(line.utf8).write(to: fileURL)
+        }
     }
 
     /// Launchers such as Flutter close the pipe they read this output from once the device is up. The
