@@ -25,8 +25,8 @@ abstract record DeviceCommand
     public static readonly (string Title, DeviceCommand Command, string Shortcut)[][] MenuGroups =
     [
         [("返回", new Key("GoBack"), "Ctrl+B"), ("主屏幕", new Key("GoHome"), "Ctrl+Shift+H"), ("最近任务", new Key("AppSwitch"), "Ctrl+Shift+O")],
-        [("截图", new Do(DeviceAction.Screenshot), "Ctrl+S"), ("拷贝截图", new Do(DeviceAction.CopyScreenshot), "Ctrl+Shift+S"),
-         ("开始或停止录屏", new Do(DeviceAction.Record), "Ctrl+Shift+R"),
+        [("截图", new Do(DeviceAction.Screenshot), "Ctrl+S"), ("开始或停止录屏", new Do(DeviceAction.Record), "Ctrl+Shift+R"),
+         ("发送文字到剪贴板…", new Do(DeviceAction.SendClipboard), "Ctrl+Shift+V"),
          ("向左旋转", new Do(DeviceAction.RotateLeft), "Ctrl+←"),
          ("向右旋转", new Do(DeviceAction.RotateRight), "Ctrl+→"), ("折叠 / 展开", new Do(DeviceAction.ToggleFold), "Ctrl+Shift+F")],
         [("音量 −", new Key("AudioVolumeDown"), "Ctrl+Alt+↓"), ("音量 +", new Key("AudioVolumeUp"), "Ctrl+Alt+↑"), ("电源", new Key("Power"), "Ctrl+L")],
@@ -460,8 +460,8 @@ sealed partial class DeviceSession
             (VirtualKey.H, true, false) => new DeviceCommand.Key("GoHome"),
             (VirtualKey.O, true, false) => new DeviceCommand.Key("AppSwitch"),
             (VirtualKey.S, false, false) => new DeviceCommand.Do(DeviceAction.Screenshot),
-            (VirtualKey.S, true, false) => new DeviceCommand.Do(DeviceAction.CopyScreenshot),
             (VirtualKey.R, true, false) => new DeviceCommand.Do(DeviceAction.Record),
+            (VirtualKey.V, true, false) => new DeviceCommand.Do(DeviceAction.SendClipboard),
             (VirtualKey.Left, false, false) => new DeviceCommand.Do(DeviceAction.RotateLeft),
             (VirtualKey.Right, false, false) => new DeviceCommand.Do(DeviceAction.RotateRight),
             (VirtualKey.F, true, false) => new DeviceCommand.Do(DeviceAction.ToggleFold),
@@ -1050,9 +1050,8 @@ sealed partial class DeviceSession
             case DeviceAction.Minimize: Window?.Minimize(); break;
             case DeviceAction.Screenshot when physical != null: PhysicalScreenshot(); break;
             case DeviceAction.Screenshot: TakeScreenshot(); break;
-            case DeviceAction.CopyScreenshot when physical != null: PhysicalCopyScreenshot(); break;
-            case DeviceAction.CopyScreenshot: CopyScreenshot(); break;
             case DeviceAction.Record when physical != null: physical.Store.ToggleRecording(physical.Id); break;
+            case DeviceAction.SendClipboard when physical != null: SendTextToClipboard(); break;
             case DeviceAction.RotateLeft: Rotate(1); break;
             case DeviceAction.RotateRight: Rotate(-1); break;
             case DeviceAction.ToggleFold: ToggleFold(); break;
@@ -1065,7 +1064,7 @@ sealed partial class DeviceSession
     {
         DeviceCommand.Do { Action: DeviceAction.ToggleFold } => closedSkin != null,
         DeviceCommand.Do { Action: DeviceAction.RotateLeft or DeviceAction.RotateRight } => physical == null,
-        DeviceCommand.Do { Action: DeviceAction.Record } => physical != null,
+        DeviceCommand.Do { Action: DeviceAction.Record or DeviceAction.SendClipboard } => physical != null,
         _ => true,
     };
 
@@ -1532,23 +1531,6 @@ sealed partial class DeviceSession
                 Log.Error($"screenshot failed: {error.Message}");
             }
         });
-    }
-
-    /// Puts the emulator's screen on the Windows clipboard.
-    private async void CopyScreenshot()
-    {
-        if (client == null) return;
-        view?.Flash();
-        try
-        {
-            await PhysicalDeviceStore.CopyToClipboard(await client.ScreenshotPng());
-            Log.Info("screenshot copied to the clipboard");
-            chrome?.ShowToast("截图已拷贝到剪贴板", () => { });
-        }
-        catch (Exception error)
-        {
-            Log.Error($"screenshot copy failed: {error.Message}");
-        }
     }
 
     private void Fail(Exception error)

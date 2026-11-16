@@ -3,9 +3,7 @@ using System.Runtime.InteropServices;
 using System.Text.Json.Nodes;
 using System.Text.RegularExpressions;
 using Microsoft.UI.Dispatching;
-using System.Runtime.InteropServices.WindowsRuntime;
 using Windows.ApplicationModel.DataTransfer;
-using Windows.Storage.Streams;
 
 namespace EmulatorShell;
 
@@ -76,6 +74,8 @@ sealed partial class PhysicalDeviceStore
     public HashSet<string> Busy { get; } = [];
     /// Devices whose stream reported that they refuse input from adb.
     public HashSet<string> InputRefused { get; } = [];
+    /// Devices text is on its way to the clipboard of.
+    public HashSet<string> SendingClipboard { get; } = [];
     private PhysicalToast? toast;
     public PhysicalToast? Toast
     {
@@ -478,11 +478,25 @@ sealed partial class PhysicalDeviceStore
     /// Saves the screen to the Desktop at the display's resolution; without `completion`, says so in a toast.
     public async void Screenshot(string id, Action<string?, string?>? completion = null)
     {
-        if (Device(id) is not { Serial: not null } device) return;
+        if (Device(id) is not { Serial: { } serial } device) return;
         var path = ScreenRecorder.DesktopPath(device.Name, "png");
+        var frame = streams.TryGetValue(id, out var stream) && stream.IsStreaming ? stream.LastFrame() : null;
         try
         {
-            await File.WriteAllBytesAsync(path, await ScreenshotPng(id));
+            // `screencap` gives the display's own resolution; the stream's frame, which may be scaled down, only if
+            // that fails.
+            byte[] png;
+            try
+            {
+                png = await Adb.ScreenshotPng(serial);
+            }
+            catch when (frame != null)
+            {
+                png = await Pictures.EncodePng(frame);
+            }
+            // An app that forbids screenshots (FLAG_SECURE) comes through black.
+            if (await Pictures.IsBlack(png)) throw new ShellException("画面是全黑的：当前应用可能不允许截屏，或者屏幕关着");
+            await File.WriteAllBytesAsync(path, png);
             Log.Info($"screenshot saved to {path}");
             if (completion != null) completion(path, null); else Toast = new PhysicalToast("截图已存到桌面", path);
         }
@@ -491,44 +505,6 @@ sealed partial class PhysicalDeviceStore
             Log.Error($"screenshot failed: {error.Message}");
             if (completion != null) completion(null, error.Message); else Toast = new PhysicalToast($"截图失败：{error.Message}", IsError: true);
         }
-    }
-
-    /// Puts the screen on the Windows clipboard at the display's resolution, ready to paste into a chat or a
-    /// document; without `completion`, says so in a toast. `completion` gets the error, or null.
-    public async void CopyScreenshot(string id, Action<string?>? completion = null)
-    {
-        if (Device(id)?.Serial == null) return;
-        try
-        {
-            await CopyToClipboard(await ScreenshotPng(id));
-            Log.Info("screenshot copied to the clipboard");
-            if (completion != null) completion(null); else Toast = new PhysicalToast("截图已拷贝到剪贴板");
-        }
-        catch (Exception error)
-        {
-            Log.Error($"screenshot copy failed: {error.Message}");
-            if (completion != null) completion(error.Message); else Toast = new PhysicalToast($"截图失败：{error.Message}", IsError: true);
-        }
-    }
-
-    /// The screen as PNG. `screencap` gives the display's own resolution; the stream's frame, which may be scaled
-    /// down, only if that fails.
-    private async Task<byte[]> ScreenshotPng(string id)
-    {
-        if (Device(id) is not { Serial: { } serial }) throw new ShellException("设备已断开");
-        var frame = streams.TryGetValue(id, out var stream) && stream.IsStreaming ? stream.LastFrame() : null;
-        byte[] png;
-        try
-        {
-            png = await Adb.ScreenshotPng(serial);
-        }
-        catch when (frame != null)
-        {
-            png = await Pictures.EncodePng(frame);
-        }
-        // An app that forbids screenshots (FLAG_SECURE) comes through black.
-        if (await Pictures.IsBlack(png)) throw new ShellException("画面是全黑的：当前应用可能不允许截屏，或者屏幕关着");
-        return png;
     }
 
     // Recording
@@ -626,34 +602,55 @@ sealed partial class PhysicalDeviceStore
     /// Text this app is about to put on a device's clipboard.
     public void NoteSentToDevice(string text) => sentToDevice = text;
 
-    /// Puts an image on the Windows clipboard as a bitmap, which Windows also offers as a DIB, and as "PNG", which
-    /// browsers and Office prefer. Call on the UI thread. Clipboard sync sends only text, so the image stays here.
-    public static async Task CopyToClipboard(byte[] png)
+    /// Puts `text` on the device's clipboard, to paste there; `completion` gets an error message or null, and without
+    /// it a toast says how it went. The device's stream carries it if one runs; otherwise a short stream of its own
+    /// does, without sound and without turning the screen on.
+    public void SendToClipboard(string text, string id, Action<string?>? completion = null)
     {
-        static async Task<InMemoryRandomAccessStream> StreamOf(byte[] data)
+        if (text.Length == 0 || Device(id) is not { Serial: { } serial } || !SendingClipboard.Add(id)) return;
+        Changed?.Invoke();
+        ScrcpyStream? carrier = null;
+        var timeout = queue.CreateTimer();
+        var finished = false;
+        void Finish(string? error)
         {
-            var stream = new InMemoryRandomAccessStream();
-            await stream.WriteAsync(data.AsBuffer());
-            stream.Seek(0);
-            return stream;
+            if (finished) return;
+            finished = true;
+            timeout.Stop();
+            if (carrier != null)
+            {
+                carrier.StateChanged -= CarrierChanged;
+                carrier.Stop();
+            }
+            SendingClipboard.Remove(id);
+            if (error != null) Log.Error($"sending to the clipboard failed: {error}"); else Log.Info($"clipboard sent to {id}");
+            if (completion != null) completion(error);
+            else Toast = error != null ? new PhysicalToast(error, IsError: true) : new PhysicalToast("已添加到设备的剪贴板，在设备上长按输入框粘贴");
+            Changed?.Invoke();
         }
-        var package = new DataPackage();
-        package.SetBitmap(RandomAccessStreamReference.CreateFromStream(await StreamOf(png)));
-        package.SetData("PNG", await StreamOf(png));
-        // Another app may hold the clipboard open for a moment.
-        for (var attempt = 0; ; attempt++)
+        void CarrierChanged(ScrcpyStream.State state)
         {
-            try
-            {
-                Clipboard.SetContent(package);
-                Clipboard.Flush();
-                return;
-            }
-            catch (Exception) when (attempt < 4)
-            {
-                await Task.Delay(100);
-            }
+            if (state.Phase == ScrcpyStream.Phase.Streaming) carrier!.SetClipboard(text, () => Finish(null));
+            else if (state.Phase == ScrcpyStream.Phase.Ended) Finish(state.Message ?? "连接断开了");
         }
+        timeout.Interval = TimeSpan.FromSeconds(15);
+        timeout.IsRepeating = false;
+        timeout.Tick += (_, _) => Finish("设备没有响应");
+        timeout.Start();
+
+        // The device does not report back what it was given, but the text is not to come back to Windows either.
+        NoteSentToDevice(text);
+        if (streams.TryGetValue(id, out var stream) && stream.IsStreaming)
+        {
+            stream.SetClipboard(text, () => Finish(null));
+            return;
+        }
+        carrier = new ScrcpyStream(serial, new ScrcpyStream.Options
+        {
+            MaxSize = 480, BitRate = 1_000_000, Audio = false, StayAwake = false, ShowTouches = false, ClipboardSync = false, PowerOn = false,
+        });
+        carrier.StateChanged += CarrierChanged;
+        carrier.Start();
     }
 
     /// The device copied something: the Windows clipboard gets it.

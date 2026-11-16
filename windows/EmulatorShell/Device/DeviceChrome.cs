@@ -13,7 +13,7 @@ using PostureValue = Android.Emulation.Control.Posture.Types.PostureValue;
 
 namespace EmulatorShell;
 
-enum DeviceAction { Close, Minimize, Screenshot, CopyScreenshot, Record, RotateLeft, RotateRight, ToggleFold }
+enum DeviceAction { Close, Minimize, Screenshot, SendClipboard, Record, RotateLeft, RotateRight, ToggleFold }
 
 /// The controls around the device, inside its window: Back / Home / Recents in a pill under the device,
 /// always shown, and a title bar with the remaining buttons that appears while the pointer is near the

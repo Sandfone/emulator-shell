@@ -77,6 +77,8 @@ final class PhysicalDeviceStore {
     @ObservationIgnored private var recorders: [String: RecorderBox] = [:]
     /// Times a stream has failed in a row, so a broken one is not restarted forever.
     @ObservationIgnored private var failures: [String: Int] = [:]
+    /// Devices the Mac's clipboard is on its way to.
+    private(set) var sendingClipboard: Set<String> = []
     @ObservationIgnored private var clipboardTimer: Timer?
     @ObservationIgnored private var pasteboardCount = NSPasteboard.general.changeCount
 
@@ -383,11 +385,25 @@ final class PhysicalDeviceStore {
 
     /// Saves the screen to the Desktop at the display's resolution.
     func screenshot(_ id: String, completion: ((Result<URL, Error>) -> Void)? = nil) {
-        guard let device = device(id), device.serial != nil else { return }
+        guard let device = device(id), let serial = device.serial else { return }
         let url = ScreenRecorder.desktopURL(name: device.name, extension: "png")
+        let frame = streams[id].flatMap { $0.state == .streaming ? $0.lastFrame : nil }
         Task {
             do {
-                try await screenshotPNG(id).write(to: url)
+                // `screencap` gives the display's own resolution; the stream's frame, which may be scaled
+                // down, only if that fails.
+                let png: Data
+                do {
+                    png = try await Adb.screenshotPNG(serial: serial)
+                } catch {
+                    guard let frame, let data = Self.png(of: frame) else { throw error }
+                    png = data
+                }
+                // An app that forbids screenshots (FLAG_SECURE) comes through black.
+                if let image = NSBitmapImageRep(data: png)?.cgImage, Self.isBlack(image) {
+                    throw ShellError("画面是全黑的：当前应用可能不允许截屏")
+                }
+                try png.write(to: url)
                 Log.info("screenshot saved to \(url.path)")
                 if completion == nil { toast = Toast(text: "截图已存到桌面", url: url) }
                 completion?(.success(url))
@@ -397,51 +413,6 @@ final class PhysicalDeviceStore {
                 completion?(.failure(error))
             }
         }
-    }
-
-    /// Puts the screen on the Mac's clipboard at the display's resolution, ready to paste into a chat or a document.
-    func copyScreenshot(_ id: String, completion: ((Error?) -> Void)? = nil) {
-        guard device(id)?.serial != nil else { return }
-        Task {
-            do {
-                Self.copyToPasteboard(png: try await screenshotPNG(id))
-                Log.info("screenshot copied to the clipboard")
-                if completion == nil { toast = Toast(text: "截图已拷贝到剪贴板") }
-                completion?(nil)
-            } catch {
-                Log.error("screenshot copy failed: \(error)")
-                if completion == nil { toast = Toast(text: "截图失败：\(error.localizedDescription)", isError: true) }
-                completion?(error)
-            }
-        }
-    }
-
-    /// The screen as PNG. `screencap` gives the display's own resolution; the stream's frame, which may be
-    /// scaled down, only if that fails.
-    private func screenshotPNG(_ id: String) async throws -> Data {
-        guard let serial = device(id)?.serial else { throw ShellError("设备已断开") }
-        let frame = streams[id].flatMap { $0.state == .streaming ? $0.lastFrame : nil }
-        let png: Data
-        do {
-            png = try await Adb.screenshotPNG(serial: serial)
-        } catch {
-            guard let frame, let data = Self.png(of: frame) else { throw error }
-            png = data
-        }
-        // An app that forbids screenshots (FLAG_SECURE) comes through black.
-        if let image = NSBitmapImageRep(data: png)?.cgImage, Self.isBlack(image) {
-            throw ShellError("画面是全黑的：当前应用可能不允许截屏")
-        }
-        return png
-    }
-
-    /// Both PNG and, through the image, TIFF: some apps only take one of them. Clipboard sync sends only
-    /// text, so the image stays on the Mac.
-    static func copyToPasteboard(png: Data) {
-        let pasteboard = NSPasteboard.general
-        pasteboard.clearContents()
-        if let image = NSImage(data: png) { pasteboard.writeObjects([image]) }
-        pasteboard.setData(png, forType: .png)
     }
 
     /// Core Image contexts are safe to use from any thread.
@@ -537,6 +508,42 @@ final class PhysicalDeviceStore {
         NSPasteboard.general.clearContents()
         NSPasteboard.general.setString(text, forType: .string)
         pasteboardCount = NSPasteboard.general.changeCount
+    }
+
+    /// Puts `text` on the device's clipboard, to paste there; `completion` gets an error message or nil, and
+    /// without it a toast says how it went. The device's stream carries it if one runs; otherwise a short stream
+    /// of its own does, without sound and without turning the screen on.
+    func sendToClipboard(_ text: String, id: String, completion: ((String?) -> Void)? = nil) {
+        let report: (String?) -> Void = { [weak self] error in
+            if let error { Log.error("sending the clipboard failed: \(error)") } else { Log.info("clipboard sent to \(id)") }
+            if let completion { return completion(error) }
+            self?.toast = error.map { Toast(text: $0, isError: true) } ?? Toast(text: "已添加到设备的剪贴板，在设备上长按输入框粘贴")
+        }
+        guard !text.isEmpty, let serial = device(id)?.serial, !sendingClipboard.contains(id) else { return }
+        sendingClipboard.insert(id)
+        let sending = ClipboardSending { [weak self] error in
+            self?.sendingClipboard.remove(id)
+            report(error)
+        }
+        Task {
+            try? await Task.sleep(for: .seconds(15))
+            sending.finish("设备没有响应")
+        }
+        if let stream = streams[id], stream.state == .streaming {
+            stream.setClipboard(text) { sending.finish(nil) }
+            return
+        }
+        let carrier = ScrcpyStream(serial: serial, options: .init(maxSize: 480, bitRate: 1_000_000, audio: false, stayAwake: false,
+                                                                showTouches: false, clipboardSync: false, powerOn: false))
+        sending.onFinish = { carrier.onStateChange = nil; carrier.stop() }
+        carrier.onStateChange = { [weak carrier] state in
+            switch state {
+            case .streaming: carrier?.setClipboard(text) { sending.finish(nil) }
+            case let .ended(message): sending.finish(message ?? "连接断开了")
+            case .connecting: break
+            }
+        }
+        carrier.start()
     }
 
     /// While a stream with clipboard sync runs, what is copied on the Mac goes to the device.
@@ -726,5 +733,23 @@ final class RecorderBox: @unchecked Sendable {
             return self.recorder
         }
         return await recorder?.finish(at: ScreenRecorder.now) ?? false
+    }
+}
+
+/// One sending of the clipboard, which ends once: acknowledged, failed or timed out.
+@MainActor
+private final class ClipboardSending {
+    private var report: ((String?) -> Void)?
+    /// Run as it ends, before the report: closing a stream opened for it.
+    var onFinish: (() -> Void)?
+
+    init(report: @escaping (String?) -> Void) { self.report = report }
+
+    func finish(_ error: String?) {
+        guard let report else { return }
+        self.report = nil
+        onFinish?()
+        onFinish = nil
+        report(error)
     }
 }

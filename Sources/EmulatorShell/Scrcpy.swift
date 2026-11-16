@@ -24,6 +24,8 @@ final class ScrcpyStream {
         var stayAwake = true
         var showTouches = false
         var clipboardSync = true
+        /// Turns the screen on as the stream starts.
+        var powerOn = true
     }
 
     enum State: Equatable {
@@ -49,6 +51,9 @@ final class ScrcpyStream {
 
     private var connection: ScrcpyConnection?
     private let sinks = ScrcpySinks()
+    /// What to call when the device acknowledges a clipboard, by the sequence number sent with it.
+    private var clipboardAcks: [UInt64: () -> Void] = [:]
+    private var clipboardSequence: UInt64 = 0
 
     init(serial: String, options: Options) {
         self.serial = serial
@@ -97,11 +102,14 @@ final class ScrcpyStream {
             onAudioAvailable?(available)
         case let .clipboard(text):
             onClipboard?(text)
+        case let .clipboardAck(sequence):
+            clipboardAcks.removeValue(forKey: sequence)?()
         case .inputRefused:
             onInputRefused?()
         case let .ended(message):
             connection = nil
             hasAudio = false
+            clipboardAcks.removeAll()
             state = .ended(message)
         }
     }
@@ -189,8 +197,20 @@ final class ScrcpyStream {
 
     /// Sets the device's clipboard; `paste` also pastes it where the cursor is (Android 7+).
     func setClipboard(_ text: String, paste: Bool) {
+        setClipboard(text, paste: paste, sequence: 0)
+    }
+
+    /// Sets the device's clipboard and calls `acknowledged` once the device has; not if the stream ends first.
+    func setClipboard(_ text: String, acknowledged: @escaping () -> Void) {
+        clipboardSequence += 1
+        clipboardAcks[clipboardSequence] = acknowledged
+        setClipboard(text, paste: false, sequence: clipboardSequence)
+    }
+
+    /// A non-zero `sequence` asks the device to acknowledge it.
+    private func setClipboard(_ text: String, paste: Bool, sequence: UInt64) {
         var message = ControlMessage(type: 9)
-        message.u64(0)
+        message.u64(sequence)
         message.u8(paste ? 1 : 0)
         var data = Data(text.utf8)
         if data.count > 262_130 { data = data.prefix(262_130) }
@@ -290,6 +310,7 @@ private final class ScrcpyConnection: @unchecked Sendable {
         case videoSize(CGSize)
         case audio(Bool)
         case clipboard(String)
+        case clipboardAck(UInt64)
         case inputRefused
         case ended(String?)
     }
@@ -394,7 +415,7 @@ private final class ScrcpyConnection: @unchecked Sendable {
             "audio=\(options.audio)", "control=true",
             "max_size=\(options.maxSize)", "video_bit_rate=\(options.bitRate)",
             "stay_awake=\(options.stayAwake)", "show_touches=\(options.showTouches)",
-            "clipboard_autosync=\(options.clipboardSync)", "power_on=true",
+            "clipboard_autosync=\(options.clipboardSync)", "power_on=\(options.powerOn)",
         ]
         if options.audio { arguments.append("audio_codec=raw") }
         try launchServer(arguments)
@@ -501,7 +522,7 @@ private final class ScrcpyConnection: @unchecked Sendable {
                     let text = String(decoding: try socket.read(length), as: UTF8.self)
                     onEvent?(.clipboard(text))
                 case 1:
-                    _ = try socket.read(8)
+                    onEvent?(.clipboardAck(try socket.read(8).readU64(at: 0)))
                 case 2:
                     _ = try socket.read(2)
                     let size = Int(try socket.read(2).readU16(at: 0))

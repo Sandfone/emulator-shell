@@ -8,7 +8,7 @@ import SwiftUI
 /// room for them all, so its size is the size of everything it shows.
 @MainActor
 final class DeviceChrome: NSObject, NSPopoverDelegate {
-    enum Action { case close, minimize, screenshot, copyScreenshot, record, rotateLeft, rotateRight, toggleFold, posture(PostureValue) }
+    enum Action { case close, minimize, screenshot, sendClipboard, record, rotateLeft, rotateRight, toggleFold, posture(PostureValue) }
 
     /// A device key went down (`true`) or up; the key is a W3C key name.
     var onKey: ((_ key: String, _ pressed: Bool) -> Void)?

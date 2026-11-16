@@ -21,8 +21,8 @@ enum DeviceCommand {
             ],
             [
                 ("截图", .action(.screenshot), "s", [.command]),
-                ("拷贝截图", .action(.copyScreenshot), "s", [.command, .control]),
                 ("开始或停止录屏", .action(.record), "r", [.command, .shift]),
+                ("发送文字到剪贴板…", .action(.sendClipboard), "v", [.command, .control]),
                 ("向左旋转", .action(.rotateLeft), left, [.command]),
                 ("向右旋转", .action(.rotateRight), right, [.command]),
                 ("折叠 / 展开", .action(.toggleFold), "f", [.command, .shift]),
@@ -849,11 +849,17 @@ final class DeviceSession {
         case .close: close()
         case .minimize: window?.miniaturize(nil)
         case .screenshot: takeScreenshot()
-        case .copyScreenshot: takeScreenshot(toClipboard: true)
         case .rotateLeft: rotate(by: 1)
         case .rotateRight: rotate(by: -1)
         case .toggleFold: toggleFold()
         case .record: physical.map { $0.store?.toggleRecording($0.id) }
+        case .sendClipboard:
+            guard let physical, let store = physical.store else { break }
+            SendTextPrompt.show(deviceName: avd.name, in: nil) { [weak self] text in
+                store.sendToClipboard(text, id: physical.id) { error in
+                    self?.showToast(error ?? "已添加到设备的剪贴板", url: nil)
+                }
+            }
         case let .posture(posture): enqueue { _ = try? await $0.setPosture(posture) }
         }
     }
@@ -864,7 +870,7 @@ final class DeviceSession {
         case .action(.toggleFold): return closedSkin != nil
         // A phone turns when it is turned; recording is for phones for now.
         case .action(.rotateLeft), .action(.rotateRight): return physical == nil
-        case .action(.record): return physical != nil
+        case .action(.record), .action(.sendClipboard): return physical != nil
         default: return true
         }
     }
@@ -1308,16 +1314,9 @@ final class DeviceSession {
 
     // MARK: - Screenshot
 
-    /// To the Desktop, or with `toClipboard` onto the Mac's clipboard.
-    private func takeScreenshot(toClipboard: Bool = false) {
+    private func takeScreenshot() {
         if let physical {
             deviceView?.flash()
-            if toClipboard {
-                physical.store?.copyScreenshot(physical.id) { [weak self] error in
-                    self?.showToast(error.map { "截图失败：\($0.localizedDescription)" } ?? "截图已拷贝到剪贴板", url: nil)
-                }
-                return
-            }
             physical.store?.screenshot(physical.id) { [weak self] result in
                 switch result {
                 case let .success(url): self?.showToast("截图已存到桌面", url: url)
@@ -1328,18 +1327,6 @@ final class DeviceSession {
         }
         guard let client else { return }
         deviceView?.flash()
-        if toClipboard {
-            Task { [weak self] in
-                do {
-                    PhysicalDeviceStore.copyToPasteboard(png: try await client.screenshotPNG())
-                    Log.info("screenshot copied to the clipboard")
-                    self?.chrome?.showToast("截图已拷贝到剪贴板") {}
-                } catch {
-                    Log.error("screenshot copy failed: \(error)")
-                }
-            }
-            return
-        }
         let formatter = DateFormatter()
         formatter.dateFormat = "yyyy-MM-dd_HH.mm.ss"
         let desktop = FileManager.default.urls(for: .desktopDirectory, in: .userDomainMask)[0]

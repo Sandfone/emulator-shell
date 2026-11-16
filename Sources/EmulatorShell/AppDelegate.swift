@@ -253,8 +253,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
         guard let device = managerPhone else { return }
         switch command {
         case .action(.screenshot): manager.phones.screenshot(device.id)
-        case .action(.copyScreenshot): manager.phones.copyScreenshot(device.id)
         case .action(.record): manager.phones.toggleRecording(device.id)
+        case .action(.sendClipboard): SendTextPrompt.show(for: device, phones: manager.phones)
         default: break
         }
     }
@@ -295,8 +295,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
             guard let session = currentSession else {
                 guard managerPhone != nil else { return false }
                 if case .action(.screenshot) = command { return true }
-                if case .action(.copyScreenshot) = command { return true }
                 if case .action(.record) = command { return true }
+                if case .action(.sendClipboard) = command { return true }
                 return false
             }
             return session.state == .running && session.isAvailable(command)

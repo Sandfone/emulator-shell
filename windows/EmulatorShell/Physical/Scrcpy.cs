@@ -47,6 +47,8 @@ sealed class ScrcpyStream
         public bool StayAwake { get; init; } = true;
         public bool ShowTouches { get; init; }
         public bool ClipboardSync { get; init; } = true;
+        /// Turns the screen on as the stream starts.
+        public bool PowerOn { get; init; } = true;
     }
 
     public enum Phase { Connecting, Streaming, Ended }
@@ -84,6 +86,9 @@ sealed class ScrcpyStream
 
     private ScrcpyConnection? connection;
     private readonly ScrcpySinks sinks = new();
+    /// What to call when the device acknowledges a clipboard, by the sequence number sent with it.
+    private readonly Dictionary<ulong, Action> clipboardAcks = [];
+    private ulong clipboardSequence;
     private readonly DispatcherQueue queue = DispatcherQueue.GetForCurrentThread();
 
     public ScrcpyStream(string serial, Options options)
@@ -141,12 +146,16 @@ sealed class ScrcpyStream
             case ScrcpyConnection.Message.ClipboardText clipboard:
                 Clipboard?.Invoke(clipboard.Text);
                 break;
+            case ScrcpyConnection.Message.ClipboardAck ack:
+                if (clipboardAcks.Remove(ack.Sequence, out var acknowledged)) acknowledged();
+                break;
             case ScrcpyConnection.Message.InputRefused:
                 InputRefused?.Invoke();
                 break;
             case ScrcpyConnection.Message.Ended ended:
                 connection = null;
                 HasAudio = false;
+                clipboardAcks.Clear();
                 CurrentState = new State(Phase.Ended, ended.Reason);
                 break;
         }
@@ -228,10 +237,21 @@ sealed class ScrcpyStream
     }
 
     /// Sets the device's clipboard; `paste` also pastes it where the cursor is (Android 7+).
-    public void SetClipboard(string text, bool paste)
+    public void SetClipboard(string text, bool paste) => SetClipboard(text, paste, 0);
+
+    /// Sets the device's clipboard and calls `acknowledged` once the device has; not if the stream ends first.
+    public void SetClipboard(string text, Action acknowledged)
+    {
+        clipboardSequence++;
+        clipboardAcks[clipboardSequence] = acknowledged;
+        SetClipboard(text, false, clipboardSequence);
+    }
+
+    /// A non-zero `sequence` asks the device to acknowledge it.
+    private void SetClipboard(string text, bool paste, ulong sequence)
     {
         var message = new ControlMessage(9);
-        message.U64(0);
+        message.U64(sequence);
         message.U8(paste ? (byte)1 : (byte)0);
         var bytes = Encoding.UTF8.GetBytes(text);
         if (bytes.Length > 262_130) bytes = bytes[..262_130];
@@ -358,6 +378,7 @@ sealed class ScrcpyConnection(string serial, ScrcpyStream.Options options, Scrcp
         public sealed record VideoSize(Size Size) : Message;
         public sealed record Audio(bool Available) : Message;
         public sealed record ClipboardText(string Text) : Message;
+        public sealed record ClipboardAck(ulong Sequence) : Message;
         public sealed record InputRefused : Message;
         public sealed record Ended(string? Reason) : Message;
     }
@@ -479,7 +500,7 @@ sealed class ScrcpyConnection(string serial, ScrcpyStream.Options options, Scrcp
                 $"audio={Flag(options.Audio)}", "control=true",
                 $"max_size={options.MaxSize}", $"video_bit_rate={options.BitRate}",
                 $"stay_awake={Flag(options.StayAwake)}", $"show_touches={Flag(options.ShowTouches)}",
-                $"clipboard_autosync={Flag(options.ClipboardSync)}", "power_on=true",
+                $"clipboard_autosync={Flag(options.ClipboardSync)}", $"power_on={Flag(options.PowerOn)}",
             };
             if (options.Audio) arguments.Add("audio_codec=raw");
             LaunchServer(arguments);
@@ -653,7 +674,7 @@ sealed class ScrcpyConnection(string serial, ScrcpyStream.Options options, Scrcp
                         Event?.Invoke(new Message.ClipboardText(Encoding.UTF8.GetString(Read(stream, length))));
                         break;
                     case 1:
-                        Read(stream, 8);
+                        Event?.Invoke(new Message.ClipboardAck(BinaryPrimitives.ReadUInt64BigEndian(Read(stream, 8))));
                         break;
                     case 2:
                         Read(stream, 2);

@@ -1,5 +1,6 @@
 using System.Text.RegularExpressions;
 using Microsoft.UI.Dispatching;
+using Microsoft.UI.Xaml;
 using Windows.ApplicationModel.DataTransfer;
 using Windows.Foundation;
 using Windows.System;
@@ -336,11 +337,26 @@ sealed partial class DeviceSession
             ShowToast(path != null ? "截图已存到桌面" : $"截图失败：{error}", path));
     }
 
-    private void PhysicalCopyScreenshot()
+    private bool askingForText;
+
+    /// Asks for text in a dialog over the device and puts it on the device's clipboard.
+    private async void SendTextToClipboard()
     {
-        if (physical is not { } link) return;
-        view?.Flash();
-        link.Store.CopyScreenshot(link.Id, error => ShowToast(error == null ? "截图已拷贝到剪贴板" : $"截图失败：{error}", null));
+        if (physical is not { } link || Window?.Content is not FrameworkElement content || content.XamlRoot == null || askingForText) return;
+        askingForText = true;
+        try
+        {
+            if (await SendTextDialog.Show(content.XamlRoot, content.ActualTheme, Avd.Name) is { } text)
+                link.Store.SendToClipboard(text, link.Id, error => ShowToast(error ?? "已添加到设备的剪贴板", null));
+        }
+        catch (Exception error)
+        {
+            Log.Error($"cannot ask for text: {error.Message}");
+        }
+        finally
+        {
+            askingForText = false;
+        }
     }
 
     private void TearDownPhysical()

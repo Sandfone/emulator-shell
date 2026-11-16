@@ -92,8 +92,8 @@ struct PhysicalActions: View {
             if includeMain {
                 Button(phones.isMirroring(device.id) ? "显示投屏窗口" : "投屏") { manager.mirror(device) }
                 Button("截图") { phones.screenshot(device.id) }
-                Button("拷贝截图") { phones.copyScreenshot(device.id) }
                 Button(phones.isRecording(device.id) ? "停止录屏" : "录屏") { phones.toggleRecording(device.id) }
+                Button("发送文字到剪贴板…") { SendTextPrompt.show(for: device, phones: phones) }
                 Divider()
             }
             if !device.isWireless {
@@ -199,8 +199,6 @@ private struct PhysicalDetail: View {
                             .help("在窗口里显示这台设备，可以直接用鼠标和键盘操作")
                             Button { phones.screenshot(device.id) } label: { Label("截图", systemImage: "camera") }
                                 .help("存到桌面  ⌘S")
-                            Button { phones.copyScreenshot(device.id) } label: { Label("拷贝截图", systemImage: "doc.on.clipboard") }
-                                .help("截图并拷贝到剪贴板，可以直接粘贴到聊天或文档里  ⌃⌘S")
                             if let recording {
                                 Button { phones.toggleRecording(device.id) } label: {
                                     TimelineView(.periodic(from: recording, by: 1)) { context in
@@ -214,6 +212,9 @@ private struct PhysicalDetail: View {
                                 Button { phones.toggleRecording(device.id) } label: { Label("录屏", systemImage: "record.circle") }
                                     .help("录成 MP4 存到桌面，不用开投屏  ⇧⌘R")
                             }
+                            Button { SendTextPrompt.show(for: device, phones: phones) } label: { Label("发送文字", systemImage: "doc.on.clipboard") }
+                                .disabled(phones.sendingClipboard.contains(device.id))
+                                .help("输入一段文字，添加到设备的剪贴板，在设备上长按输入框粘贴  ⌃⌘V")
                             Menu {
                                 PhysicalActions(manager: manager, device: device, includeMain: false)
                             } label: {
@@ -224,7 +225,7 @@ private struct PhysicalDetail: View {
                             .accessibilityLabel("更多操作")
                         }
                         .controlSize(.large)
-                        Text("截图和录屏存到桌面 · ⌘S 截图 · ⌃⌘S 拷贝截图 · ⇧⌘R 开始或停止录屏")
+                        Text("截图和录屏存到桌面 · ⌘S 截图 · ⇧⌘R 开始或停止录屏 · ⌃⌘V 发送文字到剪贴板")
                             .font(.callout).foregroundStyle(.secondary)
                         if info.inputBlocked || phones.inputRefused.contains(device.id) {
                             Label("投屏时能看不能点：这台手机的开发者选项里还没打开“USB 调试（安全设置）”，系统会拒绝来自电脑的点按和输入。截图和录屏不受影响。",
@@ -515,6 +516,57 @@ struct PhysicalToast: View {
                 try? await Task.sleep(for: .seconds(5))
                 if phones.toast?.id == toast.id { withAnimation { phones.toast = nil } }
             }
+        }
+    }
+}
+
+/// Asks for text to put on a device's clipboard: a sheet on `window`, or a dialog without one (the borderless
+/// device window); ⌘↩ or 发送 sends.
+@MainActor
+enum SendTextPrompt {
+    /// The text sent last, offered again (selected, so typing replaces it).
+    private static var lastText = ""
+
+    static func show(for device: PhysicalDevice, phones: PhysicalDeviceStore) {
+        show(deviceName: device.name, in: NSApp.keyWindow) { phones.sendToClipboard($0, id: device.id) }
+    }
+
+    static func show(deviceName: String, in window: NSWindow?, send: @escaping (String) -> Void) {
+        let alert = NSAlert()
+        alert.messageText = "发送文字到“\(deviceName)”的剪贴板"
+        alert.informativeText = "发送后在设备上长按输入框粘贴。"
+        alert.icon = NSImage(systemSymbolName: "doc.on.clipboard", accessibilityDescription: nil)
+
+        let scroll = NSTextView.scrollableTextView()
+        scroll.frame = NSRect(x: 0, y: 0, width: 360, height: 120)
+        scroll.borderType = .bezelBorder
+        scroll.hasVerticalScroller = true
+        let text = scroll.documentView as! NSTextView
+        text.font = .systemFont(ofSize: NSFont.systemFontSize)
+        text.isRichText = false
+        text.allowsUndo = true
+        text.isAutomaticQuoteSubstitutionEnabled = false
+        text.isAutomaticDashSubstitutionEnabled = false
+        text.isAutomaticTextReplacementEnabled = false
+        text.string = lastText
+        text.selectAll(nil)
+        alert.accessoryView = scroll
+
+        // Return makes a new line in the text; ⌘↩ sends.
+        let sendButton = alert.addButton(withTitle: "发送")
+        sendButton.keyEquivalentModifierMask = .command
+        alert.addButton(withTitle: "取消").keyEquivalent = "\u{1b}"
+        alert.window.initialFirstResponder = text
+
+        let finish: (NSApplication.ModalResponse) -> Void = { response in
+            guard response == .alertFirstButtonReturn, !text.string.isEmpty else { return }
+            lastText = text.string
+            send(text.string)
+        }
+        if let window, window.isVisible, window.attachedSheet == nil {
+            alert.beginSheetModal(for: window, completionHandler: finish)
+        } else {
+            finish(alert.runModal())
         }
     }
 }
