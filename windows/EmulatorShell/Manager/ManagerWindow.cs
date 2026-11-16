@@ -165,6 +165,10 @@ sealed partial class ManagerWindow : Window
         {
             if (manager.SelectedPhysical is { IsOnline: true } phone) manager.Phones.Screenshot(phone.Id);
         }));
+        root.KeyboardAccelerators.Add(Accelerator(VirtualKey.S, () =>
+        {
+            if (manager.SelectedPhysical is { IsOnline: true } phone) manager.Phones.CopyScreenshot(phone.Id);
+        }, shift: true));
         root.KeyboardAccelerators.Add(Accelerator(VirtualKey.R, () =>
         {
             if (manager.SelectedPhysical is { IsOnline: true } phone) manager.Phones.ToggleRecording(phone.Id);

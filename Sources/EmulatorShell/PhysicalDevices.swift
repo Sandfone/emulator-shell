@@ -383,25 +383,11 @@ final class PhysicalDeviceStore {
 
     /// Saves the screen to the Desktop at the display's resolution.
     func screenshot(_ id: String, completion: ((Result<URL, Error>) -> Void)? = nil) {
-        guard let device = device(id), let serial = device.serial else { return }
+        guard let device = device(id), device.serial != nil else { return }
         let url = ScreenRecorder.desktopURL(name: device.name, extension: "png")
-        let frame = streams[id].flatMap { $0.state == .streaming ? $0.lastFrame : nil }
         Task {
             do {
-                // `screencap` gives the display's own resolution; the stream's frame, which may be scaled
-                // down, only if that fails.
-                let png: Data
-                do {
-                    png = try await Adb.screenshotPNG(serial: serial)
-                } catch {
-                    guard let frame, let data = Self.png(of: frame) else { throw error }
-                    png = data
-                }
-                // An app that forbids screenshots (FLAG_SECURE) comes through black.
-                if let image = NSBitmapImageRep(data: png)?.cgImage, Self.isBlack(image) {
-                    throw ShellError("画面是全黑的：当前应用可能不允许截屏")
-                }
-                try png.write(to: url)
+                try await screenshotPNG(id).write(to: url)
                 Log.info("screenshot saved to \(url.path)")
                 if completion == nil { toast = Toast(text: "截图已存到桌面", url: url) }
                 completion?(.success(url))
@@ -411,6 +397,51 @@ final class PhysicalDeviceStore {
                 completion?(.failure(error))
             }
         }
+    }
+
+    /// Puts the screen on the Mac's clipboard at the display's resolution, ready to paste into a chat or a document.
+    func copyScreenshot(_ id: String, completion: ((Error?) -> Void)? = nil) {
+        guard device(id)?.serial != nil else { return }
+        Task {
+            do {
+                Self.copyToPasteboard(png: try await screenshotPNG(id))
+                Log.info("screenshot copied to the clipboard")
+                if completion == nil { toast = Toast(text: "截图已拷贝到剪贴板") }
+                completion?(nil)
+            } catch {
+                Log.error("screenshot copy failed: \(error)")
+                if completion == nil { toast = Toast(text: "截图失败：\(error.localizedDescription)", isError: true) }
+                completion?(error)
+            }
+        }
+    }
+
+    /// The screen as PNG. `screencap` gives the display's own resolution; the stream's frame, which may be
+    /// scaled down, only if that fails.
+    private func screenshotPNG(_ id: String) async throws -> Data {
+        guard let serial = device(id)?.serial else { throw ShellError("设备已断开") }
+        let frame = streams[id].flatMap { $0.state == .streaming ? $0.lastFrame : nil }
+        let png: Data
+        do {
+            png = try await Adb.screenshotPNG(serial: serial)
+        } catch {
+            guard let frame, let data = Self.png(of: frame) else { throw error }
+            png = data
+        }
+        // An app that forbids screenshots (FLAG_SECURE) comes through black.
+        if let image = NSBitmapImageRep(data: png)?.cgImage, Self.isBlack(image) {
+            throw ShellError("画面是全黑的：当前应用可能不允许截屏")
+        }
+        return png
+    }
+
+    /// Both PNG and, through the image, TIFF: some apps only take one of them. Clipboard sync sends only
+    /// text, so the image stays on the Mac.
+    static func copyToPasteboard(png: Data) {
+        let pasteboard = NSPasteboard.general
+        pasteboard.clearContents()
+        if let image = NSImage(data: png) { pasteboard.writeObjects([image]) }
+        pasteboard.setData(png, forType: .png)
     }
 
     /// Core Image contexts are safe to use from any thread.

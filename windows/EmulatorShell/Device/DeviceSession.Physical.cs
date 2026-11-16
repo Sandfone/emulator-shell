@@ -336,6 +336,13 @@ sealed partial class DeviceSession
             ShowToast(path != null ? "截图已存到桌面" : $"截图失败：{error}", path));
     }
 
+    private void PhysicalCopyScreenshot()
+    {
+        if (physical is not { } link) return;
+        view?.Flash();
+        link.Store.CopyScreenshot(link.Id, error => ShowToast(error == null ? "截图已拷贝到剪贴板" : $"截图失败：{error}", null));
+    }
+
     private void TearDownPhysical()
     {
         physical?.Stream.RemoveSinks(this);

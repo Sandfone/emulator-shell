@@ -92,6 +92,7 @@ struct PhysicalActions: View {
             if includeMain {
                 Button(phones.isMirroring(device.id) ? "显示投屏窗口" : "投屏") { manager.mirror(device) }
                 Button("截图") { phones.screenshot(device.id) }
+                Button("拷贝截图") { phones.copyScreenshot(device.id) }
                 Button(phones.isRecording(device.id) ? "停止录屏" : "录屏") { phones.toggleRecording(device.id) }
                 Divider()
             }
@@ -198,6 +199,8 @@ private struct PhysicalDetail: View {
                             .help("在窗口里显示这台设备，可以直接用鼠标和键盘操作")
                             Button { phones.screenshot(device.id) } label: { Label("截图", systemImage: "camera") }
                                 .help("存到桌面  ⌘S")
+                            Button { phones.copyScreenshot(device.id) } label: { Label("拷贝截图", systemImage: "doc.on.clipboard") }
+                                .help("截图并拷贝到剪贴板，可以直接粘贴到聊天或文档里  ⌃⌘S")
                             if let recording {
                                 Button { phones.toggleRecording(device.id) } label: {
                                     TimelineView(.periodic(from: recording, by: 1)) { context in
@@ -221,7 +224,7 @@ private struct PhysicalDetail: View {
                             .accessibilityLabel("更多操作")
                         }
                         .controlSize(.large)
-                        Text("截图和录屏存到桌面 · ⌘S 截图 · ⇧⌘R 开始或停止录屏")
+                        Text("截图和录屏存到桌面 · ⌘S 截图 · ⌃⌘S 拷贝截图 · ⇧⌘R 开始或停止录屏")
                             .font(.callout).foregroundStyle(.secondary)
                         if info.inputBlocked || phones.inputRefused.contains(device.id) {
                             Label("投屏时能看不能点：这台手机的开发者选项里还没打开“USB 调试（安全设置）”，系统会拒绝来自电脑的点按和输入。截图和录屏不受影响。",

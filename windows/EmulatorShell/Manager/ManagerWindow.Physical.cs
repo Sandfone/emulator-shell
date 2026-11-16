@@ -198,6 +198,7 @@ sealed partial class ManagerWindow
                 {
                     Add(Phones.IsMirroring(device.Id) ? "显示投屏窗口" : "投屏", () => manager.Mirror(device), glyph: "");
                     Add("截图", () => Phones.Screenshot(device.Id), glyph: "");
+                    Add("拷贝截图", () => Phones.CopyScreenshot(device.Id), glyph: "\uE8C8");
                     Add(Phones.IsRecording(device.Id) ? "停止录屏" : "录屏", () => Phones.ToggleRecording(device.Id), glyph: "");
                     menu.Items.Add(new MenuFlyoutSeparator());
                 }
@@ -308,6 +309,9 @@ sealed partial class ManagerWindow
         var screenshot = Labeled("", "截图");
         ToolTipService.SetToolTip(screenshot, "存到桌面  Ctrl+S");
         screenshot.Click += (_, _) => Phones.Screenshot(device.Id);
+        var copy = Labeled("\uE8C8", "拷贝截图");
+        ToolTipService.SetToolTip(copy, "截图并拷贝到剪贴板，可以直接粘贴到聊天或文档里  Ctrl+Shift+S");
+        copy.Click += (_, _) => Phones.CopyScreenshot(device.Id);
         Button record;
         if (recording is { } started)
         {
@@ -329,7 +333,7 @@ sealed partial class ManagerWindow
         record.Click += (_, _) => Phones.ToggleRecording(device.Id);
         var more = new Button { Content = new FontIcon { Glyph = "", FontSize = 14 }, Flyout = PhysicalMenu(device, includeMain: false) };
         Microsoft.UI.Xaml.Automation.AutomationProperties.SetName(more, "更多操作");
-        var buttons = new StackPanel { Orientation = Orientation.Horizontal, Spacing = 8, Children = { mirror, screenshot, record, more } };
+        var buttons = new StackPanel { Orientation = Orientation.Horizontal, Spacing = 8, Children = { mirror, screenshot, copy, record, more } };
 
         var status = new TextBlock { Text = PhysicalStatus(device) };
         if (recording is { } recordingSince)
@@ -362,7 +366,7 @@ sealed partial class ManagerWindow
                     },
                 },
                 buttons,
-                new TextBlock { Text = "截图和录屏存到桌面 · Ctrl+S 截图 · Ctrl+Shift+R 开始或停止录屏", Opacity = 0.65, TextWrapping = TextWrapping.Wrap },
+                new TextBlock { Text = "截图和录屏存到桌面 · Ctrl+S 截图 · Ctrl+Shift+S 拷贝截图 · Ctrl+Shift+R 开始或停止录屏", Opacity = 0.65, TextWrapping = TextWrapping.Wrap },
             },
         };
         if (info.InputBlocked || Phones.InputRefused.Contains(device.Id))
