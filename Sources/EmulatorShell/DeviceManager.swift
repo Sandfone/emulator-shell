@@ -112,7 +112,8 @@ final class DeviceManager {
 
     func reload() {
         avds = Avd.loadAll()
-        if selection == nil || !avds.contains(where: { $0.id == selection }) && selectedPhysical == nil {
+        if selection == nil || !avds.contains(where: { $0.id == selection }) && selectedPhysical == nil
+            && !(selection == Self.physicalHelpTag && showsPhysicalHelp) {
             selection = phones.devices.first?.id ?? avds.first?.id
         }
         images = SystemImage.merge(installed: SystemImage.scanInstalled(), available: availableImages)
@@ -129,10 +130,16 @@ final class DeviceManager {
         return sessions.values.first { $0.window === window } ?? phones.sessions.values.first { $0.window === window }
     }
 
+    /// The selection of the sidebar's row offering to install platform-tools, shown only without adb.
+    static let physicalHelpTag = "device:"
+    var showsPhysicalHelp: Bool { !phones.adbInstalled }
+
     /// A physical device's row is keyed by its serial number once that is read; until then by adb's serial.
     /// A selected row whose key changed stays selected.
     func followPhysicalSelection() {
-        guard let selection, selection.hasPrefix("device:"), selectedPhysical == nil else { return }
+        // The help row goes once adb is installed.
+        if selection == Self.physicalHelpTag && !showsPhysicalHelp { selection = phones.devices.first?.id ?? avds.first?.id }
+        guard let selection, selection.hasPrefix("device:"), selection != Self.physicalHelpTag, selectedPhysical == nil else { return }
         let serial = String(selection.dropFirst("device:".count))
         if let device = phones.devices.first(where: { $0.serials.contains(serial) }) {
             self.selection = device.id

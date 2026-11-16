@@ -48,7 +48,7 @@ struct PhysicalRow: View {
     }
 }
 
-/// The sidebar's only row under "物理设备" while none is connected.
+/// The sidebar's row under "物理设备" while adb is missing, leading to installing it.
 struct ConnectHelpRow: View {
     var body: some View {
         HStack(spacing: 10) {
@@ -58,7 +58,7 @@ struct ConnectHelpRow: View {
                 .foregroundStyle(.secondary)
             VStack(alignment: .leading, spacing: 1) {
                 Text("连接 Android 设备…").lineLimit(1)
-                Text("USB 或 Wi-Fi").font(.caption).foregroundStyle(.secondary)
+                Text("需要安装 Platform-Tools").font(.caption).foregroundStyle(.secondary)
             }
         }
         .padding(.vertical, 3)
@@ -150,12 +150,10 @@ struct PhysicalDetailPane: View {
                 MessageView(symbol: "lock", title: "这台 Mac 不能访问这个 USB 设备",
                             text: "换一根数据线或 USB 口再试。序列号 \(device.serials.first ?? "")")
             }
-        } else if let selection = manager.selection, selection.hasPrefix("device:"), selection != "device:" {
+        } else {
             // The selected phone went away (unplugged, forgotten); it is selected again if it comes back.
             MessageView(symbol: "cable.connector.slash", title: "设备已断开",
                         text: "重新连上后会自动显示在这里。要连接新设备，插上数据线，或点工具栏的“Wi-Fi 配对”。")
-        } else {
-            ConnectHelpView(manager: manager)
         }
     }
 }
@@ -420,29 +418,6 @@ private struct OfflineView: View {
             .controlSize(.large)
         }
         .frame(maxWidth: 520, alignment: .leading)
-        .padding(32)
-    }
-}
-
-private struct ConnectHelpView: View {
-    let manager: DeviceManager
-
-    var body: some View {
-        VStack(alignment: .leading, spacing: 14) {
-            Text("用数据线连接手机").font(.title2.bold())
-            VStack(alignment: .leading, spacing: 8) {
-                Text("1. 设置 › 关于手机，连续点“版本号”7 次，打开开发者选项")
-                Text("2. 设置 › 系统 › 开发者选项，打开“USB 调试”")
-                Text("3. 用数据线连到这台 Mac，手机上点“允许”")
-            }
-            Text("插上后会自动出现在左栏，不用刷新。").font(.callout).foregroundStyle(.secondary)
-            Divider()
-            Text("不想插线？").font(.headline)
-            Text("Android 11 及以上可以通过 Wi-Fi 配对，手机和 Mac 连同一个网络即可。")
-            Button("通过 Wi-Fi 配对…") { manager.sheet = .pairing }
-                .buttonStyle(.borderedProminent)
-        }
-        .frame(maxWidth: 480, alignment: .leading)
         .padding(32)
     }
 }

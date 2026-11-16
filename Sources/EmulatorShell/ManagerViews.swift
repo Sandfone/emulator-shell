@@ -18,6 +18,7 @@ struct ManagerView: View {
             manager.reload()
         }
         .onChange(of: manager.phones.devices) { _, _ in manager.followPhysicalSelection() }
+        .onChange(of: manager.phones.adbInstalled) { _, _ in manager.followPhysicalSelection() }
         .toolbar {
             ToolbarItem(placement: .primaryAction) {
                 Button {
@@ -99,12 +100,16 @@ private struct Sidebar: View {
 
     var body: some View {
         List(selection: $manager.selection) {
-            Section("物理设备") {
-                ForEach(phones) { device in
-                    PhysicalRow(manager: manager, device: device, selected: manager.selection == device.id).tag(device.id)
-                }
-                if manager.phones.devices.isEmpty {
-                    ConnectHelpRow().tag(Self.helpTag)
+            // The section is there only while it lists a device (pairing is in the toolbar), or, without adb, to
+            // offer installing it.
+            if !phones.isEmpty || manager.showsPhysicalHelp {
+                Section("物理设备") {
+                    ForEach(phones) { device in
+                        PhysicalRow(manager: manager, device: device, selected: manager.selection == device.id).tag(device.id)
+                    }
+                    if manager.showsPhysicalHelp {
+                        ConnectHelpRow().tag(DeviceManager.physicalHelpTag)
+                    }
                 }
             }
             ForEach(sections, id: \.category) { section in
@@ -167,8 +172,6 @@ private struct Sidebar: View {
 }
 
 extension Sidebar {
-    /// The selection of the "connect a device" row shown while no phone is connected.
-    static let helpTag = "device:"
 }
 
 private struct SidebarRow: View {
