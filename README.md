@@ -45,7 +45,7 @@ shows the SDK the binary records.
 
 Requires the Android SDK at `$ANDROID_HOME` (or `~/Library/Android/sdk`) with the command-line
 tools, Java for `avdmanager` and `sdkmanager` (`$JAVA_HOME`, Android Studio's bundled runtime or
-Homebrew's OpenJDK), and `protoc` at `/opt/homebrew/bin/protoc` for code generation.
+Homebrew's OpenJDK), and `protoc` on the `PATH` (`brew install protobuf`; or `$PROTOC_PATH`) for code generation.
 
 ## Using it from Android Studio, Flutter and the command line
 
