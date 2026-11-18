@@ -343,6 +343,10 @@ the rotate buttons are left out. Closing the window only stops mirroring.
   developer options (`persist.security.adbinput`); the detail pane says so and the window reminds on
   the first touch. HyperOS 2 does not set that property, so a server log line saying an injected event was
   refused (`INJECT_EVENTS`) marks the device too, until its stream next starts. The screen still streams.
+- One UI (a Galaxy S10+ on Android 12) aborts the server with "stack corruption detected" as it sets up the video
+  encoder, once the server's command line reaches 265 bytes: its media framework reads that line into a fixed
+  buffer. So the server is started with only the options that differ from its defaults, 226 bytes at most. What
+  the runtime prints when it kills a server is given as the reason the stream ended, rather than 控制通道断开.
 - The window's "More" popover: sound on the Mac or on the device, turning the device's own screen off
   while mirroring, keeping it awake, clipboard sync, showing touches, quality (long side 1280 / 1920 /
   original at 4 / 8 / 16 Mbit/s) and sending files. Options other than the screen are scrcpy start

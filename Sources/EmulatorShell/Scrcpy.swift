@@ -391,8 +391,10 @@ private final class ScrcpyConnection: @unchecked Sendable {
         if let server, server.isRunning {
             DispatchQueue.global().asyncAfter(deadline: .now() + 1) { if server.isRunning { server.terminate() } }
         }
-        // The server's own error says more than a closed socket.
+        // The server's own error says more than a closed socket; so does what the runtime prints when it kills the
+        // server ("stack corruption detected (-fstack-protector)"), which is not one of the server's own lines.
         let serverError = log.last { $0.contains("ERROR") || $0.contains("Exception") }
+            ?? log.first { !$0.hasPrefix("[server]") && !$0.trimmingCharacters(in: .whitespaces).isEmpty }
         let reason = message.map { serverError.map { "\($0)" } ?? $0 }
         if let reason { Log.error("scrcpy \(serial): \(reason)") }
         onEvent?(.ended(reason))
@@ -409,15 +411,21 @@ private final class ScrcpyConnection: @unchecked Sendable {
         let port = try forward(socket: "scrcpy_\(scid)")
         defer { _ = try? adbSync(["forward", "--remove", "tcp:\(port)"], timeout: 5) }
 
+        // Only what differs from the server's defaults (H.264, sound and control on, clipboard sync and power-on
+        // on, stay-awake and touches off), to keep its command line short: One UI's media framework reads the
+        // process's command line into a fixed buffer as it sets up a video encoder, and from 265 bytes on that
+        // aborts the server with "stack corruption detected" (Galaxy S10+, Android 12). With every option spelled
+        // out the line was 250 bytes without sound and exactly 265 with it; this way it is 226 at most.
         var arguments = [
             "CLASSPATH=\(remote)", "app_process", "/", "com.genymobile.scrcpy.Server", ScrcpyStream.serverVersion,
-            "scid=\(scid)", "log_level=info", "tunnel_forward=true", "video_codec=h264",
-            "audio=\(options.audio)", "control=true",
+            "scid=\(scid)", "log_level=info", "tunnel_forward=true",
             "max_size=\(options.maxSize)", "video_bit_rate=\(options.bitRate)",
-            "stay_awake=\(options.stayAwake)", "show_touches=\(options.showTouches)",
-            "clipboard_autosync=\(options.clipboardSync)", "power_on=\(options.powerOn)",
+            options.audio ? "audio_codec=raw" : "audio=false",
         ]
-        if options.audio { arguments.append("audio_codec=raw") }
+        if options.stayAwake { arguments.append("stay_awake=true") }
+        if options.showTouches { arguments.append("show_touches=true") }
+        if !options.clipboardSync { arguments.append("clipboard_autosync=false") }
+        if !options.powerOn { arguments.append("power_on=false") }
         try launchServer(arguments)
 
         // adb accepts the connection even before the server listens; the server's first byte says it does.

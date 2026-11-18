@@ -463,8 +463,10 @@ sealed class ScrcpyConnection(string serial, ScrcpyStream.Options options, Scrcp
         }
         foreach (var socket in open) ShutDown(socket);
         if (running != null) _ = Task.Delay(1000).ContinueWith(_ => Kill(running));
-        // The server's own error says more than a closed socket.
-        var serverError = log.LastOrDefault(l => l.Contains("ERROR") || l.Contains("Exception"));
+        // The server's own error says more than a closed socket; so does what the runtime prints when it kills the
+        // server ("stack corruption detected (-fstack-protector)"), which is not one of the server's own lines.
+        var serverError = log.LastOrDefault(l => l.Contains("ERROR") || l.Contains("Exception"))
+            ?? log.FirstOrDefault(l => !l.StartsWith("[server]") && !string.IsNullOrWhiteSpace(l));
         var reason = message == null ? null : serverError ?? message;
         if (reason != null) Log.Error($"scrcpy {serial}: {reason}");
         Event?.Invoke(new Message.Ended(reason));
@@ -493,16 +495,22 @@ sealed class ScrcpyConnection(string serial, ScrcpyStream.Options options, Scrcp
         var port = Forward($"scrcpy_{scid}");
         try
         {
+            // Only what differs from the server's defaults (H.264, sound and control on, clipboard sync and power-on
+            // on, stay-awake and touches off), to keep its command line short: One UI's media framework reads the
+            // process's command line into a fixed buffer as it sets up a video encoder, and from 265 bytes on that
+            // aborts the server with "stack corruption detected" (Galaxy S10+, Android 12). With every option
+            // spelled out the line was 250 bytes without sound and exactly 265 with it; this way it is 226 at most.
             var arguments = new List<string>
             {
                 $"CLASSPATH={remote}", "app_process", "/", "com.genymobile.scrcpy.Server", ScrcpyStream.ServerVersion,
-                $"scid={scid}", "log_level=info", "tunnel_forward=true", "video_codec=h264",
-                $"audio={Flag(options.Audio)}", "control=true",
+                $"scid={scid}", "log_level=info", "tunnel_forward=true",
                 $"max_size={options.MaxSize}", $"video_bit_rate={options.BitRate}",
-                $"stay_awake={Flag(options.StayAwake)}", $"show_touches={Flag(options.ShowTouches)}",
-                $"clipboard_autosync={Flag(options.ClipboardSync)}", $"power_on={Flag(options.PowerOn)}",
+                options.Audio ? "audio_codec=raw" : "audio=false",
             };
-            if (options.Audio) arguments.Add("audio_codec=raw");
+            if (options.StayAwake) arguments.Add("stay_awake=true");
+            if (options.ShowTouches) arguments.Add("show_touches=true");
+            if (!options.ClipboardSync) arguments.Add("clipboard_autosync=false");
+            if (!options.PowerOn) arguments.Add("power_on=false");
             LaunchServer(arguments);
 
             // adb accepts the connection even before the server listens; the server's first byte says it does.
@@ -560,8 +568,6 @@ sealed class ScrcpyConnection(string serial, ScrcpyStream.Options options, Scrcp
         new Thread(() => ReadDeviceMessages(controlStream)) { IsBackground = true, Name = $"scrcpy control {serial}" }.Start();
         ReadVideo(videoStream);
     }
-
-    private static string Flag(bool value) => value ? "true" : "false";
 
     private void Register(Socket socket)
     {
