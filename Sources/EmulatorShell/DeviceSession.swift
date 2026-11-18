@@ -151,6 +151,7 @@ final class DeviceSession {
     /// `cascade` offsets the window so several devices do not open on top of each other.
     /// `extraArguments` go to the emulator as they are, e.g. the ones Android Studio or Flutter passed.
     init(avd: Avd, grpcPort: Int, coldBoot: Bool, extraArguments: [String] = [], cascade: Int) throws {
+        try avd.checkRunsOnThisMac()
         self.avd = avd
         self.grpcPort = grpcPort
         openSkin = try DeviceSkin.load(avd: avd)
@@ -230,7 +231,7 @@ final class DeviceSession {
         }
         emulator?.interrupt()
         tasks.append(Task { [weak self] in
-            try? await Task.sleep(for: .seconds(EmulatorProcess.shutdownTimeout))
+            try? await Task.pause(for: .seconds(EmulatorProcess.shutdownTimeout))
             self?.emulator?.terminate()
         })
     }
@@ -254,7 +255,7 @@ final class DeviceSession {
         Task {
             let deadline = ContinuousClock.now + .seconds(EmulatorProcess.shutdownTimeout)
             while sessions.contains(where: { $0.emulator?.isRunning == true }), ContinuousClock.now < deadline {
-                try? await Task.sleep(for: .milliseconds(100))
+                try? await Task.pause(for: .milliseconds(100))
             }
             sessions.forEach { $0.emulator?.terminate() }
             done()
@@ -651,13 +652,11 @@ final class DeviceSession {
 
     // MARK: - Emulator
 
-    /// Opens the gRPC connection and the queue device input goes through.
+    /// Makes the gRPC client and the queue device input goes through. `waitForBoot` opens its connection,
+    /// once the emulator listens.
     private func makeClient(token: String? = nil) throws -> EmulatorClient {
         let client = try EmulatorClient(port: grpcPort, token: token)
         self.client = client
-        tasks.append(Task.detached {
-            do { try await client.run() } catch { Log.error("gRPC connections ended: \(error)") }
-        })
         let (stream, continuation) = AsyncStream<@Sendable () async -> Void>.makeStream()
         input = continuation
         tasks.append(Task.detached {
@@ -699,7 +698,7 @@ final class DeviceSession {
         emulator.onExit = { [weak self] in
             DispatchQueue.main.async { MainActor.assumeIsolated { self?.emulatorExited() } }
         }
-        let logFile = FileManager.default.temporaryDirectory.appendingPathComponent("emulator-shell-\(avd.id).log")
+        let logFile = emulatorLog
         try emulator.start(logFile: logFile)
         self.emulator = emulator
         Log.info("launched emulator for \(avd.id) on gRPC port \(grpcPort), log: \(logFile.path)")
@@ -727,17 +726,22 @@ final class DeviceSession {
     private func waitForBoot(client: EmulatorClient) {
         tasks.append(Task { [weak self] in
             do {
+                try await client.waitUntilListening(timeout: .seconds(120))
+                guard let self, self.state == .booting else { return }
+                self.tasks.append(Task.detached {
+                    do { try await client.run() } catch { Log.error("gRPC connections ended: \(error)") }
+                })
                 try await client.waitUntilReachable(timeout: .seconds(120)) { booted in
                     Log.info("gRPC endpoint reachable, guest booted: \(booted)")
                 }
-                self?.startStream(client: client)
-                self?.followPosture(client: client)
-                self?.playAudio(client: client)
+                self.startStream(client: client)
+                self.followPosture(client: client)
+                self.playAudio(client: client)
                 while await !client.isBooted() {
-                    try await Task.sleep(for: .seconds(1))
+                    try await Task.pause(for: .seconds(1))
                 }
-                Log.info("\(self?.avd.id ?? "") booted")
-                guard let self, self.state == .booting else { return }
+                Log.info("\(self.avd.id) booted")
+                guard self.state == .booting else { return }
                 self.state = .running
                 self.chrome?.setReady(true)
                 self.clipboard?.start()
@@ -751,7 +755,35 @@ final class DeviceSession {
     private func emulatorExited() {
         guard state != .stopped else { return }
         if state != .stopping { Log.info("emulator for \(avd.id) exited") }
+        // An emulator this app started that goes before it has booted could not start: say why.
+        // Said before the window goes: closing the last one may quit the app.
+        if state == .booting, emulator != nil {
+            let reason = startFailure()
+            Log.error("\(avd.id): \(reason)")
+            let alert = NSAlert()
+            alert.messageText = "“\(avd.name)”没能启动"
+            alert.informativeText = reason
+            alert.runModal()
+        }
         tearDown()
+    }
+
+    /// Why the emulator gave up, from its log: the last line it marked fatal or an error, else the last one
+    /// that is not its own running commentary (QEMU's complaints come unmarked), else its last line.
+    private func startFailure() -> String {
+        let lines = ((try? String(contentsOf: emulatorLog, encoding: .utf8)) ?? "")
+            .split(separator: "\n").map { $0.trimmingCharacters(in: .whitespaces) }.filter { !$0.isEmpty }
+        let chatter = ["INFO", "WARNING", "DEBUG", "VERBOSE"]
+        let line = lines.last { $0.hasPrefix("FATAL") || $0.hasPrefix("ERROR") }
+            ?? lines.last { line in !chatter.contains { line.hasPrefix($0) } }
+            ?? lines.last
+        // "FATAL        | message" → "message"
+        let message = line.map { $0.split(separator: "|", maxSplits: 1).last.map { $0.trimmingCharacters(in: .whitespaces) } ?? $0 }
+        return (message.map { "模拟器启动后就退出了：\($0)" } ?? "模拟器启动后就退出了。") + "\n\n日志：\(emulatorLog.path)"
+    }
+
+    private var emulatorLog: URL {
+        FileManager.default.temporaryDirectory.appendingPathComponent("emulator-shell-\(avd.id).log")
     }
 
     private func tearDown() {
@@ -900,7 +932,7 @@ final class DeviceSession {
         // A screen that does not redraw (a portrait-only app) sends no frame to report the new orientation.
         guard reopensIfSilent else { return }
         Task { [weak self] in
-            try? await Task.sleep(for: .milliseconds(400))
+            try? await Task.pause(for: .milliseconds(400))
             guard let self, self.deviceTurns != target, let client = self.client else { return }
             Log.debug("no frame at the new orientation yet; reopening the screen stream")
             self.startStream(client: client)

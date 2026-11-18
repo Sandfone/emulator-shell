@@ -9,6 +9,19 @@ typealias PhoneOperation = Android_Emulation_Control_PhoneCall.Operation
 typealias PostureValue = Android_Emulation_Control_Posture.PostureValue
 typealias SnapshotDetails = Android_Emulation_Control_SnapshotDetails
 
+extension Task where Success == Never, Failure == Never {
+    /// `Task.sleep(for:)` for this app's own code, which must not call that one: the compiler emits a
+    /// specialized `Clock.sleep(for:tolerance:)` into every module that does, under one symbol name but with
+    /// async frames of different sizes (128 bytes here, 112 in grpc-swift-nio-transport, on x86_64), and the
+    /// linker keeps one. gRPC's reconnect backoff then ran this app's copy in a frame sized for its own and
+    /// aborted in `swift_task_dealloc` ("freed pointer was not the last allocation") when the sleep returned,
+    /// about a second after an emulator went away. `scripts/check-async-symbols.py` looks for such symbols.
+    static func pause(for duration: Duration) async throws {
+        let (seconds, attoseconds) = duration.components
+        try await sleep(nanoseconds: UInt64(max(0, seconds)) * 1_000_000_000 + UInt64(max(0, attoseconds)) / 1_000_000_000)
+    }
+}
+
 /// Adds `authorization: Bearer <token>` to every call.
 private struct BearerToken: ClientInterceptor {
     let token: String
@@ -28,6 +41,7 @@ private struct BearerToken: ClientInterceptor {
 final class EmulatorClient: Sendable {
     private static let maxFrameBytes = 64 * 1024 * 1024
 
+    private let port: Int
     private let grpc: GRPCClient<HTTP2ClientTransport.Posix>
     private let controller: Controller
     private let snapshotService: Android_Emulation_Control_SnapshotService.Client<HTTP2ClientTransport.Posix>
@@ -35,6 +49,7 @@ final class EmulatorClient: Sendable {
     /// `token` is the bearer token an emulator started with `-grpc-use-token` (as Android Studio does) wants
     /// on every call; it writes it into its `pid_*.ini` as `grpc.token`.
     init(port: Int, token: String? = nil) throws {
+        self.port = port
         let transport = try HTTP2ClientTransport.Posix(
             target: .ipv4(address: "127.0.0.1", port: port),
             transportSecurity: .plaintext
@@ -53,6 +68,34 @@ final class EmulatorClient: Sendable {
         grpc.beginGracefulShutdown()
     }
 
+    /// Waits until the emulator accepts connections on its gRPC port, which `run()` should wait for, so that
+    /// gRPC does not spend the emulator's start failing to connect and backing off.
+    func waitUntilListening(timeout: Duration) async throws {
+        let deadline = ContinuousClock.now + timeout
+        while ContinuousClock.now < deadline {
+            if Self.isListening(port: port) { return }
+            try await Task.pause(for: .milliseconds(200))
+        }
+        throw ShellError("emulator did not open its gRPC port \(port) within \(timeout)")
+    }
+
+    /// Whether a TCP connection to `port` on this Mac is accepted.
+    private static func isListening(port: Int) -> Bool {
+        let descriptor = socket(AF_INET, SOCK_STREAM, 0)
+        guard descriptor >= 0 else { return false }
+        defer { close(descriptor) }
+        var address = sockaddr_in()
+        address.sin_len = UInt8(MemoryLayout<sockaddr_in>.size)
+        address.sin_family = sa_family_t(AF_INET)
+        address.sin_port = in_port_t(port).bigEndian
+        address.sin_addr.s_addr = inet_addr("127.0.0.1")
+        return withUnsafePointer(to: &address) {
+            $0.withMemoryRebound(to: sockaddr.self, capacity: 1) {
+                connect(descriptor, $0, socklen_t(MemoryLayout<sockaddr_in>.size)) == 0
+            }
+        }
+    }
+
     /// Polls `getStatus` until the gRPC endpoint answers, then until the guest reports booted.
     func waitUntilReachable(timeout: Duration, onStatus: @Sendable (Bool) -> Void) async throws {
         let clock = ContinuousClock()
@@ -62,7 +105,7 @@ final class EmulatorClient: Sendable {
                 onStatus(status.booted)
                 return
             }
-            try await Task.sleep(for: .milliseconds(500))
+            try await Task.pause(for: .milliseconds(500))
         }
         throw ShellError("emulator gRPC endpoint did not answer within \(timeout)")
     }

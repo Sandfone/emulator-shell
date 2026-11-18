@@ -42,7 +42,7 @@ final class PairingModel {
             }
             while !Task.isCancelled {
                 await self?.poll()
-                try? await Task.sleep(for: .seconds(1))
+                try? await Task.pause(for: .seconds(1))
             }
         }
     }

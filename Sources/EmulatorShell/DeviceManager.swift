@@ -462,10 +462,10 @@ final class DeviceManager {
         return name
     }
 
-    /// The newest installed image a device category can run.
+    /// The newest installed image a device category can run, on this Mac's processor.
     func defaultImage(for category: DeviceCategory) -> SystemImage? {
-        images.first { $0.family == category.family && $0.status == .installed && !$0.isPreview }
-            ?? images.first { $0.family == category.family && $0.status == .installed }
+        let usable = images.filter { $0.family == category.family && $0.status == .installed && $0.runsOnThisMac }
+        return usable.first { !$0.isPreview } ?? usable.first
     }
 
     func nameError(_ form: AvdForm) -> String? {
@@ -484,6 +484,7 @@ final class DeviceManager {
         if let progress = downloads[image.id] { return "正在下载 \(image.apiLabel)（\(Int(progress * 100))%）…" }
         if image.status == .broken { return "这个镜像目录是空的，安装没有完成。重新下载后才能使用。" }
         if image.status == .available { return "这个镜像还没有下载。" }
+        if !image.runsOnThisMac { return "这个镜像是 \(image.platformLabel) 平台的，这台 Mac（\(HostPlatform.chip)）运行不了。请换一个 \(HostPlatform.label) 平台的镜像。" }
         return nil
     }
 
@@ -543,6 +544,8 @@ final class DeviceManager {
                 config["tag.id"] = image.tag
                 config["abi.type"] = image.abi
             }
+            // The emulator goes by `hw.cpu.arch`, and refuses an image for another processor than it names.
+            config["hw.cpu.arch"] = image.cpuArch
         }
         if creating, config["skin.path"] == nil || config["skin.name"] == nil,
            let skin = deviceTypes.first(where: { $0.id == form.deviceTypeId })?.skinPath {

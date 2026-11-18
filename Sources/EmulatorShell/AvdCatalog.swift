@@ -133,7 +133,28 @@ struct DeviceType: Identifiable, Hashable {
     }
 }
 
-/// An arm64 system image, installed or offered by sdkmanager.
+/// The processor this Mac has and the system images its emulator runs: only those built for that processor,
+/// arm64 ones on Apple silicon and x86 ones on Intel. It exits at once with any other.
+enum HostPlatform {
+    #if arch(arm64)
+    static let label = "arm64"
+    static let chip = "Apple 芯片"
+    #else
+    static let label = "x86_64"
+    static let chip = "Intel 处理器"
+    #endif
+
+    /// `abi` is a system image's folder name or an AVD's `abi.type`: `arm64-v8a`, `x86_64`, `x86`.
+    static func runs(abi: String) -> Bool {
+        #if arch(arm64)
+        abi.hasPrefix("arm64")
+        #else
+        abi.hasPrefix("x86")
+        #endif
+    }
+}
+
+/// A system image, installed or offered by sdkmanager, for any processor.
 struct SystemImage: Identifiable, Hashable {
     enum Status { case installed, broken, available }
 
@@ -201,7 +222,13 @@ struct SystemImage: Identifiable, Hashable {
 
     var isPreview: Bool { ["beta", "canary", "preview"].contains(where: apiFolder.lowercased().contains) }
 
-    /// Installed images under `system-images/*/*/arm64-v8a`. A folder without `source.properties` is an
+    var runsOnThisMac: Bool { HostPlatform.runs(abi: abi) }
+    /// The processor the image is built for, as the images sheet names it.
+    var platformLabel: String { abi == "arm64-v8a" ? "arm64" : abi }
+    /// The value of `hw.cpu.arch` in an AVD using this image, as avdmanager writes it.
+    var cpuArch: String { ["arm64-v8a": "arm64", "armeabi-v7a": "arm", "armeabi": "arm"][abi] ?? abi }
+
+    /// Installed images under `system-images/*/*/<abi>`. A folder without `source.properties` is an
     /// interrupted install: sdkmanager lists it as version "unknown" and the emulator cannot boot it.
     static func scanInstalled() -> [SystemImage] {
         let base = Sdk.root.appendingPathComponent("system-images")
@@ -209,16 +236,20 @@ struct SystemImage: Identifiable, Hashable {
         var images: [SystemImage] = []
         for api in (try? fm.contentsOfDirectory(atPath: base.path)) ?? [] where api.hasPrefix("android-") {
             for tag in (try? fm.contentsOfDirectory(atPath: base.appendingPathComponent(api).path)) ?? [] {
-                let folder = base.appendingPathComponent("\(api)/\(tag)/arm64-v8a")
-                guard fm.fileExists(atPath: folder.path) else { continue }
-                let properties = try? IniFile(contentsOf: folder.appendingPathComponent("source.properties"))
-                images.append(SystemImage(
-                    apiFolder: api, tag: tag, abi: "arm64-v8a",
-                    status: properties == nil ? .broken : .installed,
-                    description: properties?["Pkg.Desc"] ?? "",
-                    revision: properties?["Pkg.Revision"],
-                    extensionLevel: properties?["AndroidVersion.ExtensionLevel"]
-                ))
+                let tagFolder = base.appendingPathComponent("\(api)/\(tag)")
+                for abi in (try? fm.contentsOfDirectory(atPath: tagFolder.path)) ?? [] where !abi.hasPrefix(".") {
+                    let folder = tagFolder.appendingPathComponent(abi)
+                    var isFolder: ObjCBool = false
+                    guard fm.fileExists(atPath: folder.path, isDirectory: &isFolder), isFolder.boolValue else { continue }
+                    let properties = try? IniFile(contentsOf: folder.appendingPathComponent("source.properties"))
+                    images.append(SystemImage(
+                        apiFolder: api, tag: tag, abi: abi,
+                        status: properties == nil ? .broken : .installed,
+                        description: properties?["Pkg.Desc"] ?? "",
+                        revision: properties?["Pkg.Revision"],
+                        extensionLevel: properties?["AndroidVersion.ExtensionLevel"]
+                    ))
+                }
             }
         }
         return images
@@ -238,7 +269,7 @@ struct SystemImage: Identifiable, Hashable {
             let columns = line.trimmingCharacters(in: .whitespaces)
                 .components(separatedBy: "  ").map { $0.trimmingCharacters(in: .whitespaces) }.filter { !$0.isEmpty }
             let parts = columns.first?.split(separator: "/").map(String.init) ?? []
-            guard parts.count == 4, parts[0] == "system-images", parts[3] == "arm64-v8a" else { continue }
+            guard parts.count == 4, parts[0] == "system-images" else { continue }
             images.append(SystemImage(
                 apiFolder: parts[1], tag: parts[2], abi: parts[3], status: .available,
                 description: columns.count > 2 ? columns[2] : "", revision: columns.count > 1 ? columns[1] : nil
@@ -247,7 +278,8 @@ struct SystemImage: Identifiable, Hashable {
         return images
     }
 
-    /// Installed and broken images, plus offered ones not on disk, newest first.
+    /// Installed and broken images, plus offered ones not on disk, newest first; of the same image for
+    /// several processors, this Mac's first.
     static func merge(installed: [SystemImage], available: [SystemImage]) -> [SystemImage] {
         var byId = Dictionary(installed.map { ($0.id, $0) }, uniquingKeysWith: { a, _ in a })
         for image in available {
@@ -261,7 +293,9 @@ struct SystemImage: Identifiable, Hashable {
         return byId.values.sorted { a, b in
             a.apiFolder != b.apiFolder
                 ? a.apiFolder.compare(b.apiFolder, options: .numeric) == .orderedDescending
-                : a.tag < b.tag
+                : a.tag != b.tag ? a.tag < b.tag
+                : a.runsOnThisMac != b.runsOnThisMac ? a.runsOnThisMac
+                : a.abi < b.abi
         }
     }
 }
@@ -278,6 +312,12 @@ struct Avd: Identifiable, Hashable {
     var sysdir: String? { config["image.sysdir.1"] }
     var isColdBoot: Bool { config["fastboot.forceColdBoot"] == "yes" }
     var isLandscape: Bool { config["hw.initialOrientation"] == "landscape" }
+    /// See `HostPlatform`.
+    func checkRunsOnThisMac() throws {
+        // Both name the processor; the emulator wants each to be the Mac's.
+        guard let abi = [config["abi.type"], config["hw.cpu.arch"]].compactMap({ $0 }).first(where: { !HostPlatform.runs(abi: $0) }) else { return }
+        throw ShellError("它的系统镜像是 \(abi) 架构，这台 Mac 是 \(HostPlatform.chip)，模拟器运行不了。请换用与这台 Mac 架构一致的系统镜像。")
+    }
     var resolution: String? {
         guard let width = config["hw.lcd.width"], let height = config["hw.lcd.height"] else { return nil }
         return "\(width) × \(height)" + (config["hw.lcd.density"].map { " · \($0) dpi" } ?? "")

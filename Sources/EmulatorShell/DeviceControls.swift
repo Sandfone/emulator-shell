@@ -172,7 +172,7 @@ final class DeviceControls {
     func touchFingerprint() async {
         await run("已触摸指纹传感器。") { client in
             try await client.touchFingerprint(true, finger: 1)
-            try await Task.sleep(for: .milliseconds(250))
+            try await Task.pause(for: .milliseconds(250))
             try await client.touchFingerprint(false, finger: 1)
         }
     }

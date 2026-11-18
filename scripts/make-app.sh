@@ -11,7 +11,10 @@ work="$root/.build/app"
 
 cd "$root"
 swift build -c release
-binary="$(swift build -c release --show-bin-path)/EmulatorShell"
+bin="$(swift build -c release --show-bin-path)"
+binary="$bin/EmulatorShell"
+# Symbols that would make the app abort at run time (see the script) stop the build here.
+scripts/check-async-symbols.py "$bin"
 
 rm -rf "$work"
 mkdir -p "$work/Emulator Shell.app/Contents/MacOS" "$work/Emulator Shell.app/Contents/Resources" "$work/AppIcon.iconset"

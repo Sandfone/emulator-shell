@@ -86,7 +86,7 @@ binary then becomes `emulator.real`).
 | Wipe data | deletes `userdata-qemu.img*`, `cache.img*` and `snapshots/` |
 | Delete | `avdmanager delete avd -n <id>` |
 | Device types | `avdmanager list device`, grouped by tag and name; XR and glasses profiles are left out |
-| System images | arm64 folders under `system-images/`; a folder without `source.properties` is an interrupted install. Downloadable ones come from `sdkmanager --list`, cached in `~/Library/Caches/EmulatorShell/sdkmanager-list.txt` and refreshed when the images sheet opens. Download and remove use `sdkmanager --install` / `--uninstall`. |
+| System images | Every ABI folder under `system-images/`; the sheet lists the ones for the Mac's own processor (arm64 on Apple silicon, x86 on Intel) unless 显示全部平台的镜像 is on, which adds a 平台 column, and only those are offered for a device; a folder without `source.properties` is an interrupted install. Downloadable ones come from `sdkmanager --list`, cached in `~/Library/Caches/EmulatorShell/sdkmanager-list.txt` and refreshed when the images sheet opens. Download and remove use `sdkmanager --install` / `--uninstall`. |
 
 ## Input
 

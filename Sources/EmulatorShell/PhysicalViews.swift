@@ -254,7 +254,7 @@ private struct PhysicalDetail: View {
         .task(id: device.id) {
             // The battery and free space change; read them again now and then while shown.
             while !Task.isCancelled {
-                try? await Task.sleep(for: .seconds(30))
+                try? await Task.pause(for: .seconds(30))
                 await phones.refreshInfo(device.id)
             }
         }
@@ -488,7 +488,7 @@ struct PhysicalToast: View {
             .padding(16)
             .transition(.move(edge: .bottom).combined(with: .opacity))
             .task(id: toast.id) {
-                try? await Task.sleep(for: .seconds(5))
+                try? await Task.pause(for: .seconds(5))
                 if phones.toast?.id == toast.id { withAnimation { phones.toast = nil } }
             }
         }

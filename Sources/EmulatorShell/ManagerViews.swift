@@ -600,7 +600,7 @@ private struct AvdFormSheet: View {
         return .phone
     }
     private var compatibleImages: [SystemImage] {
-        manager.images.filter { $0.family == category.family && $0.status != .available }
+        manager.images.filter { $0.family == category.family && $0.status != .available && $0.runsOnThisMac }
     }
     private var selectedImage: SystemImage? { manager.images.first { $0.id == form.imageId } }
 
@@ -796,9 +796,14 @@ private struct ImagesSheet: View {
     @Bindable var manager: DeviceManager
     @State private var family: ImageFamily?
     @State private var showPreview = false
+    /// Off, only images this Mac's emulator runs are listed; on, every image, each with its platform.
+    @State private var showAllPlatforms = false
 
     private var rows: [SystemImage] {
-        manager.images.filter { (family == nil || $0.family == family) && (showPreview || !$0.isPreview) && $0.family != .other }
+        manager.images.filter {
+            (family == nil || $0.family == family) && (showPreview || !$0.isPreview) && $0.family != .other
+                && (showAllPlatforms || $0.runsOnThisMac)
+        }
     }
 
     var body: some View {
@@ -810,7 +815,7 @@ private struct ImagesSheet: View {
                     ProgressView().controlSize(.small)
                     Text("正在获取可下载列表…").font(.caption).foregroundStyle(.secondary)
                 } else {
-                    Text("SDK 位置：\(Sdk.root.path.replacingOccurrences(of: FileManager.default.homeDirectoryForCurrentUser.path, with: "~")) · 只列出 arm64 镜像")
+                    Text("SDK 位置：\(Sdk.root.path.replacingOccurrences(of: FileManager.default.homeDirectoryForCurrentUser.path, with: "~")) · 本机：\(HostPlatform.chip)（\(HostPlatform.label)）")
                         .font(.caption).foregroundStyle(.secondary)
                 }
             }
@@ -823,12 +828,17 @@ private struct ImagesSheet: View {
                 .labelsHidden()
                 .fixedSize()
                 Spacer()
+                Toggle("显示全部平台的镜像", isOn: $showAllPlatforms)
                 Toggle("显示预览版和 Canary", isOn: $showPreview)
             }
             Table(rows) {
                 TableColumn("版本") { image in Text(image.apiLabel).fontWeight(.semibold) }
                     .width(min: 120, ideal: 150)
                 TableColumn("类型") { image in Text(image.kindLabel) }
+                if showAllPlatforms {
+                    TableColumn("平台") { image in platform(image) }
+                        .width(min: 90, ideal: 110)
+                }
                 TableColumn("状态") { image in status(image) }
                     .width(min: 170, ideal: 210)
                 TableColumn("") { image in action(image) }
@@ -836,7 +846,8 @@ private struct ImagesSheet: View {
             }
             .frame(height: 420)
             HStack {
-                Text("正被模拟器使用的镜像不能删除。").font(.caption).foregroundStyle(.secondary)
+                Text("正被模拟器使用的镜像不能删除。" + (showAllPlatforms ? "这台 Mac 只能运行 \(HostPlatform.label) 平台的镜像。" : ""))
+                    .font(.caption).foregroundStyle(.secondary)
                 Spacer()
                 Button("完成") { close() }.keyboardShortcut(.defaultAction)
             }
@@ -844,6 +855,20 @@ private struct ImagesSheet: View {
         .padding(20)
         .frame(width: 820)
         .onAppear { manager.refreshAvailableImages() }
+    }
+
+    /// The image's processor; one this Mac's emulator cannot run is marked.
+    private func platform(_ image: SystemImage) -> some View {
+        HStack(spacing: 6) {
+            Text(image.platformLabel)
+                .font(.caption.monospaced())
+                .padding(.horizontal, 6).padding(.vertical, 2)
+                .background(Capsule().fill(image.runsOnThisMac ? Color.accentColor.opacity(0.2) : Color.secondary.opacity(0.18)))
+            if !image.runsOnThisMac {
+                Image(systemName: "exclamationmark.triangle.fill").foregroundStyle(.orange)
+                    .help("这台 Mac 是 \(HostPlatform.chip)，运行不了 \(image.platformLabel) 平台的镜像。")
+            }
+        }
     }
 
     @ViewBuilder

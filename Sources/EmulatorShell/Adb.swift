@@ -138,7 +138,7 @@ enum Adb {
         // adbd restarts on the device; it takes a moment to listen.
         var lastError: Error = ShellError("连接 \(address) 失败")
         for _ in 0..<10 {
-            try await Task.sleep(for: .milliseconds(700))
+            try await Task.pause(for: .milliseconds(700))
             do {
                 try await connect(address)
                 return address

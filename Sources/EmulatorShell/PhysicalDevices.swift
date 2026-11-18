@@ -133,7 +133,7 @@ final class PhysicalDeviceStore {
                     return
                 } catch {
                     Log.error("cannot read \(serial)'s details (attempt \(attempt + 1)): \(error)")
-                    try? await Task.sleep(for: .seconds(1))
+                    try? await Task.pause(for: .seconds(1))
                 }
             }
         }
@@ -308,7 +308,7 @@ final class PhysicalDeviceStore {
             failures[id] = failed
             if message != nil, failed <= 2, device(id)?.isOnline == true {
                 Task { [weak self] in
-                    try? await Task.sleep(for: .seconds(Double(failed)))
+                    try? await Task.pause(for: .seconds(Double(failed)))
                     guard let self, self.sessions[id] != nil, let stream = self.streams[id], case .ended = stream.state,
                           self.device(id)?.isOnline == true else { return }
                     stream.start()
@@ -488,14 +488,14 @@ final class PhysicalDeviceStore {
         while !Task.isCancelled {
             if let stream = streams[id], stream.state == .streaming, let frame = stream.lastFrame {
                 if let image = Self.cgImage(of: frame) { thumbnails[id] = image }
-                try? await Task.sleep(for: .seconds(1))
+                try? await Task.pause(for: .seconds(1))
             } else if let serial = device(id)?.serial {
                 if let png = try? await Adb.screenshotPNG(serial: serial), let image = NSBitmapImageRep(data: png)?.cgImage {
                     thumbnails[id] = image
                 }
-                try? await Task.sleep(for: .seconds(2))
+                try? await Task.pause(for: .seconds(2))
             } else {
-                try? await Task.sleep(for: .seconds(2))
+                try? await Task.pause(for: .seconds(2))
             }
         }
     }
@@ -526,7 +526,7 @@ final class PhysicalDeviceStore {
             report(error)
         }
         Task {
-            try? await Task.sleep(for: .seconds(15))
+            try? await Task.pause(for: .seconds(15))
             sending.finish("设备没有响应")
         }
         if let stream = streams[id], stream.state == .streaming {
