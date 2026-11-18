@@ -491,10 +491,12 @@ sealed class DeviceManager
         return unique;
     }
 
-    /// The newest installed image a device category can run.
-    public SystemImage? DefaultImage(DeviceCategory category) =>
-        Images.FirstOrDefault(i => i.Family == category.Family() && i.Status == ImageStatus.Installed && !i.IsPreview)
-        ?? Images.FirstOrDefault(i => i.Family == category.Family() && i.Status == ImageStatus.Installed);
+    /// The newest installed image a device category can run, on this computer's processor.
+    public SystemImage? DefaultImage(DeviceCategory category)
+    {
+        var usable = Images.Where(i => i.Family == category.Family() && i.Status == ImageStatus.Installed && i.RunsHere).ToList();
+        return usable.FirstOrDefault(i => !i.IsPreview) ?? usable.FirstOrDefault();
+    }
 
     public string? NameError(AvdForm form)
     {
@@ -513,6 +515,7 @@ sealed class DeviceManager
         if (Downloads.TryGetValue(image.Id, out var progress)) return $"正在下载 {image.ApiLabel}（{(int)(progress * 100)}%）…";
         if (image.Status == ImageStatus.Broken) return "这个镜像目录是空的，安装没有完成。重新下载后才能使用。";
         if (image.Status == ImageStatus.Available) return "这个镜像还没有下载。";
+        if (!image.RunsHere) return $"这个镜像是 {image.PlatformLabel} 平台的，这台电脑（{Sdk.HostLabel}）运行不了。请换一个 {Sdk.HostLabel} 平台的镜像。";
         return null;
     }
 
@@ -584,6 +587,8 @@ sealed class DeviceManager
                 config["tag.id"] = image.Tag;
                 config["abi.type"] = image.Abi;
             }
+            // The emulator goes by `hw.cpu.arch`, and refuses an image for another processor than it names.
+            config["hw.cpu.arch"] = image.CpuArch;
         }
         if (creating && (config["skin.path"] == null || config["skin.name"] == null)
             && DeviceTypes.FirstOrDefault(t => t.Id == form.DeviceTypeId)?.SkinPath is { } skin)

@@ -52,8 +52,14 @@ static class Sdk
         }
     }
 
-    /// The ABI of system images this computer runs: the emulator only accelerates its own architecture.
-    public static string HostAbi => RuntimeInformation.OSArchitecture == Architecture.Arm64 ? "arm64-v8a" : "x86_64";
+    private static bool IsArm => RuntimeInformation.OSArchitecture == Architecture.Arm64;
+
+    /// This computer's processor, as the images dialog names it. Its emulator runs only system images built for
+    /// that processor, arm64 ones on ARM and x86 ones otherwise, and exits at once with any other.
+    public static string HostLabel => IsArm ? "arm64" : "x86_64";
+
+    /// `abi` is a system image's folder name or an AVD's `abi.type` or `hw.cpu.arch`: `arm64-v8a`, `x86_64`, `x86`.
+    public static bool Runs(string abi) => abi.StartsWith(IsArm ? "arm64" : "x86");
 
     /// A tool from `cmdline-tools/latest`, or from the newest other version installed.
     public static string Tool(string name)

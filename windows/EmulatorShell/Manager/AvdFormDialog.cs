@@ -36,7 +36,7 @@ sealed partial class AvdFormDialog : ContentDialog
         }
     }
 
-    private List<SystemImage> CompatibleImages => manager.Images.Where(i => i.Family == Category.Family() && i.Status != ImageStatus.Available).ToList();
+    private List<SystemImage> CompatibleImages => manager.Images.Where(i => i.Family == Category.Family() && i.Status != ImageStatus.Available && i.RunsHere).ToList();
     private SystemImage? SelectedImage => manager.Images.FirstOrDefault(i => i.Id == Form.ImageId);
 
     public AvdFormDialog(DeviceManager manager, AvdForm form)

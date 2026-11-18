@@ -5,8 +5,8 @@ namespace EmulatorShell;
 /// the mouse. Commands are separated by `;`: `wait <ms>`, `select <avd id>`, `new`, `edit`, `images`, `hide` (closes
 /// the dialog showing), `shot <name>` (a marker for a screen capture), `forwarder install|uninstall|state`, `create`
 /// (a new AVD from the default form), `delete <avd id>`, `owner <avd id>`, `stop <avd id>`, `quit`; for physical devices
-/// `phones` (logs them), `mirror <device id>`, `phoneshot <device id>`, `record <device id>` (starts or stops) and
-/// `pairing` (opens the Wi-Fi pairing dialog); `theme dark|light|default` sets the window's theme, as the system
+/// `phones` (logs them), `mirror <device id>`, `phoneshot <device id>`, `record <device id>` (starts or stops),
+/// `sendtext <device id> <text>` (to its clipboard) and `pairing` (opens the Wi-Fi pairing dialog); `theme dark|light|default` sets the window's theme, as the system
 /// switching it does; `fail` throws on the UI thread, as an unexpected error would.
 sealed partial class ManagerWindow
 {
@@ -103,6 +103,9 @@ sealed partial class ManagerWindow
                     case "phoneshot": manager.Phones.Screenshot(argument); break;
                     case "record": manager.Phones.ToggleRecording(argument); break;
                     case "pairing": _ = ShowPairing(); break;
+                    case "sendtext":
+                        if (argument.Split(' ', 2) is [var target, var typed]) manager.Phones.SendToClipboard(typed, target);
+                        break;
                     case "fail": Fail(); break;
                     case "theme":
                         if (Content is Microsoft.UI.Xaml.FrameworkElement root)

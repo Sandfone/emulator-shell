@@ -138,9 +138,20 @@ sealed record DeviceType(string Id, string Name, string Oem, DeviceCategory Cate
 
 enum ImageStatus { Installed, Broken, Available }
 
-/// A system image for this computer's architecture, installed or offered by sdkmanager.
+/// A system image, installed or offered by sdkmanager, for any processor.
 sealed record SystemImage(string ApiFolder, string Tag, string Abi)
 {
+    public bool RunsHere => Sdk.Runs(Abi);
+    /// The processor the image is built for, as the images dialog names it.
+    public string PlatformLabel => Abi == "arm64-v8a" ? "arm64" : Abi;
+    /// The value of `hw.cpu.arch` in an AVD using this image, as avdmanager writes it.
+    public string CpuArch => Abi switch
+    {
+        "arm64-v8a" => "arm64",
+        "armeabi-v7a" or "armeabi" => "arm",
+        _ => Abi,
+    };
+
     public ImageStatus Status { get; init; }
     public string Description { get; init; } = "";
     public string? Revision { get; init; }
@@ -206,7 +217,7 @@ sealed record SystemImage(string ApiFolder, string Tag, string Abi)
 
     public bool IsPreview => new[] { "beta", "canary", "preview" }.Any(ApiFolder.ToLowerInvariant().Contains);
 
-    /// Installed images under `system-images/*/*/<host ABI>`. A folder without `source.properties` is an
+    /// Installed images under `system-images/*/*/<abi>`. A folder without `source.properties` is an
     /// interrupted install: sdkmanager lists it as version "unknown" and the emulator cannot boot it.
     public static List<SystemImage> ScanInstalled()
     {
@@ -217,16 +228,17 @@ sealed record SystemImage(string ApiFolder, string Tag, string Abi)
         {
             foreach (var tag in Directory.GetDirectories(Path.Combine(root, api!)).Select(Path.GetFileName))
             {
-                var folder = Path.Combine(root, api!, tag!, Sdk.HostAbi);
-                if (!Directory.Exists(folder)) continue;
-                var properties = IniFile.TryLoad(Path.Combine(folder, "source.properties"));
-                images.Add(new SystemImage(api!, tag!, Sdk.HostAbi)
+                foreach (var folder in Directory.GetDirectories(Path.Combine(root, api!, tag!)))
                 {
-                    Status = properties == null ? ImageStatus.Broken : ImageStatus.Installed,
-                    Description = properties?["Pkg.Desc"] ?? "",
-                    Revision = properties?["Pkg.Revision"],
-                    ExtensionLevel = properties?["AndroidVersion.ExtensionLevel"],
-                });
+                    var properties = IniFile.TryLoad(Path.Combine(folder, "source.properties"));
+                    images.Add(new SystemImage(api!, tag!, Path.GetFileName(folder))
+                    {
+                        Status = properties == null ? ImageStatus.Broken : ImageStatus.Installed,
+                        Description = properties?["Pkg.Desc"] ?? "",
+                        Revision = properties?["Pkg.Revision"],
+                        ExtensionLevel = properties?["AndroidVersion.ExtensionLevel"],
+                    });
+                }
             }
         }
         return images;
@@ -251,7 +263,7 @@ sealed record SystemImage(string ApiFolder, string Tag, string Abi)
                 .Select(c => c.Trim()).Where(c => c.Length > 0).ToArray();
             if (columns.Length == 0) continue;
             var parts = columns[0].Split(';', '/');
-            if (parts.Length != 4 || parts[0] != "system-images" || parts[3] != Sdk.HostAbi) continue;
+            if (parts.Length != 4 || parts[0] != "system-images") continue;
             images.Add(new SystemImage(parts[1], parts[2], parts[3])
             {
                 Status = ImageStatus.Available,
@@ -262,7 +274,8 @@ sealed record SystemImage(string ApiFolder, string Tag, string Abi)
         return images;
     }
 
-    /// Installed and broken images, plus offered ones not on disk, newest first.
+    /// Installed and broken images, plus offered ones not on disk, newest first; of the same image for several
+    /// processors, this computer's first.
     public static List<SystemImage> Merge(List<SystemImage> installed, List<SystemImage> available)
     {
         var byId = new Dictionary<string, SystemImage>();
@@ -281,6 +294,8 @@ sealed record SystemImage(string ApiFolder, string Tag, string Abi)
         return byId.Values
             .OrderByDescending(i => i.ApiFolder, NumericComparer.Instance)
             .ThenBy(i => i.Tag, StringComparer.Ordinal)
+            .ThenByDescending(i => i.RunsHere)
+            .ThenBy(i => i.Abi, StringComparer.Ordinal)
             .ToList();
     }
 }
@@ -305,6 +320,15 @@ sealed record Avd(string Id, string Folder, IReadOnlyDictionary<string, string> 
     public string? Sysdir => Config.GetValueOrDefault("image.sysdir.1");
     public bool IsColdBoot => Config.GetValueOrDefault("fastboot.forceColdBoot") == "yes";
     public bool IsLandscape => Config.GetValueOrDefault("hw.initialOrientation") == "landscape";
+
+    /// Throws if the AVD is for another processor than this computer's (see `Sdk.Runs`): `abi.type` and
+    /// `hw.cpu.arch` both name it, and the emulator wants each to be the computer's.
+    public void CheckRunsHere()
+    {
+        var abi = new[] { Config.GetValueOrDefault("abi.type"), Config.GetValueOrDefault("hw.cpu.arch") }.FirstOrDefault(a => a != null && !Sdk.Runs(a));
+        if (abi != null)
+            throw new ShellException($"它的系统镜像是 {abi} 架构，这台电脑是 {Sdk.HostLabel}，模拟器运行不了。请换用与这台电脑架构一致的系统镜像。");
+    }
 
     public string? Resolution =>
         Config.GetValueOrDefault("hw.lcd.width") is { } width && Config.GetValueOrDefault("hw.lcd.height") is { } height

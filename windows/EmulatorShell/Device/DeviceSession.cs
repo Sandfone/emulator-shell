@@ -163,6 +163,7 @@ sealed partial class DeviceSession
     /// `extraArguments` go to the emulator as they are, e.g. the ones Android Studio or Flutter passed.
     public static async Task<DeviceSession> Start(Avd avd, int grpcPort, bool coldBoot, IReadOnlyList<string> extraArguments, int cascade)
     {
+        avd.CheckRunsHere();
         var openSkin = await DeviceSkin.Load(avd);
         var session = new DeviceSession(avd, grpcPort, openSkin, await LoadClosedSkin(avd, openSkin));
         session.ShowWindow(cascade);
@@ -865,6 +866,7 @@ sealed partial class DeviceSession
         var logFile = Path.Combine(logs, $"emulator-{Avd.Id}.log");
         emulator.Start(logFile);
         this.emulator = emulator;
+        emulatorLog = logFile;
         Log.Info($"launched emulator for {Avd.Id} on gRPC port {GrpcPort}, log: {logFile}");
         StartClipboardAndControls(client);
         WaitForBoot(client);
@@ -911,11 +913,51 @@ sealed partial class DeviceSession
     /// See DeviceSession.Debug.cs.
     partial void RunTestScript();
 
-    private void EmulatorExited()
+    /// Where the output of the emulator this session started goes.
+    private string? emulatorLog;
+    private bool exitHandled;
+
+    private async void EmulatorExited()
     {
-        if (State == SessionState.Stopped) return;
+        if (State == SessionState.Stopped || exitHandled) return;
+        exitHandled = true;
         if (State != SessionState.Stopping) Log.Info($"emulator for {Avd.Id} exited");
+        // An emulator this app started that goes before it has booted could not start: say why, before the window
+        // goes, as closing the last one may end the app.
+        if (State == SessionState.Booting && emulatorLog is { } log)
+        {
+            // The last lines of its output are still on their way to the log.
+            await Task.Delay(300);
+            if (State == SessionState.Booting)
+            {
+                var reason = StartFailure(log);
+                Log.Error($"{Avd.Id}: {reason}");
+                Dialogs.Alert(Window?.Hwnd ?? 0, $"“{Avd.Name}”没能启动", reason);
+            }
+        }
         TearDown();
+    }
+
+    /// Why the emulator gave up, from its log: the last line it marked fatal or an error, else the last one that
+    /// is not its own running commentary (QEMU's complaints come unmarked), else its last line.
+    private static string StartFailure(string logFile)
+    {
+        var lines = new List<string>();
+        try
+        {
+            // The log is still open for writing.
+            using var stream = new FileStream(logFile, FileMode.Open, FileAccess.Read, FileShare.ReadWrite | FileShare.Delete);
+            using var reader = new StreamReader(stream);
+            lines = reader.ReadToEnd().Split('\n').Select(l => l.Trim()).Where(l => l.Length > 0).ToList();
+        }
+        catch { }
+        string[] chatter = ["INFO", "WARNING", "DEBUG", "VERBOSE"];
+        var line = lines.LastOrDefault(l => l.StartsWith("FATAL") || l.StartsWith("ERROR"))
+                   ?? lines.LastOrDefault(l => !chatter.Any(l.StartsWith))
+                   ?? lines.LastOrDefault();
+        // "FATAL        | message" → "message"
+        var message = line?.Split('|', 2)[^1].Trim();
+        return (message is { Length: > 0 } ? $"模拟器启动后就退出了：{message}" : "模拟器启动后就退出了。") + $"\n\n日志：{logFile}";
     }
 
     private void TearDown()

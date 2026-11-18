@@ -463,14 +463,17 @@ without it `dotnet publish` leaves out the app's `.pri`, and the manager fails t
     encoder: NVIDIA's hardware encoder MFT ended the whole process a few frames into a recording. The writer is made
     and used on the recorder's own thread, in the multithreaded apartment.
   - Keys: Alt-drag pinches, the wheel scrolls, Ctrl+V pastes the Windows clipboard on the device, Ctrl+Shift+R
-    records (in the window, or for the phone selected in the manager), Ctrl+S takes a screenshot there too, and
-    Ctrl+Shift+N opens Wi-Fi pairing; its QR code is drawn with QRCoder (MIT). Text typed through the device's
+    records (in the window, or for the phone selected in the manager), Ctrl+S takes a screenshot there too,
+    Ctrl+Shift+V asks for text to put on the device's clipboard, and Ctrl+Shift+N opens Wi-Fi pairing; its QR code is drawn with QRCoder (MIT). Text typed through the device's
     clipboard (Chinese, emoji) is not copied back to the Windows clipboard.
   - Screenshots and recordings go to the Desktop, as on macOS; `scrcpy-server` and its license are copied next to the
     app (and into the installer).
 - **Files**: settings in `%LOCALAPPDATA%\EmulatorShell\settings.json`; emulator output in
   `%LOCALAPPDATA%\EmulatorShell\Logs\emulator-<avd>.log`; running emulators are found through
-  `%TEMP%\avd\running\pid_*.ini`. System images listed are the host's ABI (`x86_64`, or `arm64-v8a` on ARM).
+  `%TEMP%\avd\running\pid_*.ini`. System images listed are the ones for
+  the computer's processor (x86 ones, or arm64 ones on ARM); 显示全部平台的镜像 lists every one, as on macOS. An
+  AVD for another processor is refused with the reason, an emulator that exits before it has booted leaves an
+  alert with its log's last error line, and choosing another image writes `hw.cpu.arch` too.
 - **SDK forwarder**: `emulator.exe` cannot be a script, so the forwarder is a small program
   (`windows/Forwarder`, built next to the app as `EmulatorShellForwarder.exe`). Turning it on copies it over
   `emulator\emulator.exe`, keeps the original as `emulator.real.exe`, and writes the app's path to
