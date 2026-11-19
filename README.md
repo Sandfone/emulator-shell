@@ -1,5 +1,7 @@
 # Emulator Shell
 
+English | [简体中文](README.zh-CN.md)
+
 A macOS prototype that renders an Android emulator's device frame itself instead of using the
 emulator's own window. The emulator runs headless (`-no-window -gpu host -grpc <port>`); this app streams
 the display over the emulator's gRPC API and composites it under the skin artwork with
@@ -7,6 +9,17 @@ Core Animation, so the frame edge and screen corners are antialiased against the
 
 A Windows version lives in `windows/` (WinUI 3 and C#); see [Windows](#windows) below. The rest of this
 document describes the macOS app, which the Windows one follows feature for feature.
+
+<table>
+  <tr>
+    <td align="center" valign="bottom"><img src="docs/images/device.png" width="240" alt="A Pixel 9 Pro in its device window, with the title bar hidden and the button pill below it"></td>
+    <td align="center" valign="bottom"><img src="docs/images/manager.png" width="560" alt="The device manager: AVDs grouped by category on the left, the selected one's live preview and details on the right"></td>
+  </tr>
+  <tr>
+    <td align="center">Device window</td>
+    <td align="center">Device manager</td>
+  </tr>
+</table>
 
 ## Run
 
@@ -34,6 +47,8 @@ cmdline-tools, Java, AVDs (flagging ones for another processor), connected phone
 is installed, with how to fix each, then offers to open the app. Finder lays the window out, so the first run asks
 to let the terminal control Finder. The app is signed ad hoc and not notarized, so on another Mac it opens the
 first time with right-click › 打开.
+
+<p align="center"><img src="docs/images/installer.png" width="500" alt="The installer window: the app, a swipe towards Applications, and the 检查开发环境 card below"></p>
 
 Quitting (⌘Q) or closing a device window (⌘W) shuts its emulator down the same way as closing the
 emulator's own window, quick-boot snapshot included. The windows go at once; the app finishes
