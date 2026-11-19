@@ -10,3 +10,6 @@ windows/**/*.user
 
 # Release installers (windows\package.ps1)
 windows/dist/
+
+# macOS installer (scripts/make-dmg.sh)
+/dist/

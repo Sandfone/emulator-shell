@@ -25,6 +25,16 @@ directly, without the manager, and quits when its window closes.
 Run it again after changing the code. The bundle identifier is `EmulatorShell`, the defaults domain of
 the bare executable, so window sizes and settings are the same whichever way the app is started.
 
+`scripts/make-dmg.sh` builds the installer for other Macs, `dist/EmulatorShell-<version>-<arch>.dmg`
+(about 12 MB, the version 1.0.<number of commits> as on Windows). The image, its volume and the window carry the
+app's icon. The window is drawn as a landscape Android screen (`scripts/make-dmg-art.swift`): a status bar with
+the version, a swipe from the app to Applications, and a card for 检查开发环境 (`scripts/dmg/检查开发环境.command`),
+which opens in Terminal and checks what the app needs the way `Sdk.swift` looks for it: the SDK, emulator, adb,
+cmdline-tools, Java, AVDs (flagging ones for another processor), connected phones and whether the SDK forwarder
+is installed, with how to fix each, then offers to open the app. Finder lays the window out, so the first run asks
+to let the terminal control Finder. The app is signed ad hoc and not notarized, so on another Mac it opens the
+first time with right-click › 打开.
+
 Quitting (⌘Q) or closing a device window (⌘W) shuts its emulator down the same way as closing the
 emulator's own window, quick-boot snapshot included. The windows go at once; the app finishes
 quitting in the background once every emulator has saved its snapshot (about 10 s for a phone). Several devices can run at once; each gets

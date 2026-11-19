@@ -61,6 +61,8 @@ codesign --force --sign - "$bundle"
 mkdir -p "$dest"
 rm -rf "$app"
 mv "$bundle" "$app"
-# Let Launch Services pick up the new icon and Info.plist.
-/System/Library/Frameworks/CoreServices.framework/Frameworks/LaunchServices.framework/Support/lsregister -f "$app"
+# Let Launch Services pick up the new icon and Info.plist (not for a copy that only goes into the installer).
+if [[ -z ${EMULATOR_SHELL_NO_REGISTER:-} ]]; then
+    /System/Library/Frameworks/CoreServices.framework/Frameworks/LaunchServices.framework/Support/lsregister -f "$app"
+fi
 echo "Installed $app"
